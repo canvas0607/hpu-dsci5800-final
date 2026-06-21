@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>家具选择助手</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="panel">
+          <div>
+            <p class="eyebrow">Furniture Assistant</p>
+            <h1>家具选择助手</h1>
+          </div>
+
+          <label>
+            用户 UID
+            <input id="uid" placeholder="点击注册生成" />
+          </label>
+          <button id="registerBtn" type="button">注册新用户</button>
+
+          <label>
+            预算
+            <input id="budget" type="number" min="0" step="1" placeholder="例如 800" />
+          </label>
+
+          <label>
+            空间图片
+            <input id="image" type="file" accept="image/*" />
+          </label>
+        </aside>
+
+        <section class="composer">
+          <form id="recommendForm">
+            <label>
+              需求
+              <textarea
+                id="request"
+                rows="7"
+                placeholder="例如：我想布置一个小户型客厅，喜欢北欧、浅木色，需要沙发、茶几和储物。"
+              ></textarea>
+            </label>
+            <button id="submitBtn" type="submit">生成推荐</button>
+          </form>
+
+          <section id="result" class="result hidden">
+            <div id="roomPreview" class="room-preview hidden">
+              <img id="roomImage" class="hidden" alt="整体家具摆放效果图" />
+              <div>
+                <h2>摆放方案</h2>
+                <p id="renderNote" class="render-note hidden"></p>
+                <div id="placements" class="placements"></div>
+              </div>
+            </div>
+            <div class="summary">
+              <h2>推荐结果</h2>
+              <p id="total"></p>
+              <pre id="text"></pre>
+            </div>
+            <div id="items" class="items"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js?v=5"></script>
+  </body>
+</html>

@@ -1,0 +1,1 @@
+"""Furniture choice assistant package."""
