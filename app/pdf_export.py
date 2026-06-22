@@ -49,7 +49,7 @@ def build_plan_pdf(plan: RecommendationResponse) -> bytes:
 
     writer.divider()
     writer.paragraph(
-        "提示：价格、库存、配送和安装条件请以对应官网或官方授权渠道信息为准。",
+        "提示：价格、库存、配送和安装条件请以官网信息为准。",
         color=MUTED_COLOR,
     )
     return writer.bytes()

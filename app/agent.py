@@ -15,7 +15,7 @@ from app.layout import plan_furniture_layout
 from app.models import FurnitureItem, FurniturePlacement, RecommendationResponse, RoomPlan
 from app.pdf_utils import analyze_pdf_bytes
 from app.prompts import PREFERENCE_PROMPT, RECOMMENDATION_PROMPT, SYSTEM_PROMPT
-from app.search import search_ikea_furniture
+from app.search import search_furniture
 from app.storage import add_history, get_preferences, update_preferences
 from app.tools import calculate_cart_total
 
@@ -48,8 +48,22 @@ def _get_llm():
 
 
 async def load_user_context(state: FurnitureState) -> FurnitureState:
+    _reset_transient_state(state)
     state["preferences"] = get_preferences(state["uid"])
     return state
+
+
+def _reset_transient_state(state: FurnitureState) -> None:
+    state["image_notes"] = ""
+    state["pdf_notes"] = ""
+    state["target_rooms"] = []
+    state["items"] = []
+    state["placements"] = []
+    state["room_image_url"] = ""
+    state["room_plans"] = []
+    state["pricing"] = {}
+    state["response_text"] = ""
+    state["total"] = 0.0
 
 
 async def understand_image(state: FurnitureState) -> FurnitureState:
@@ -140,7 +154,7 @@ async def search_candidates(state: FurnitureState) -> FurnitureState:
         ]
         if part
     )
-    state["items"] = await search_ikea_furniture(
+    state["items"] = await search_furniture(
         query=query,
         budget=state.get("budget"),
         preferences=state.get("preferences", {}),
@@ -170,7 +184,7 @@ async def build_room_plans(state: FurnitureState) -> FurnitureState:
             ]
             if part
         )
-        items = await search_ikea_furniture(
+        items = await search_furniture(
             query=room_query,
             budget=None,
             preferences=state.get("preferences", {}),
@@ -244,6 +258,12 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
     state["pricing"] = pricing
     state["total"] = total
 
+    if not items:
+        state["response_text"] = _no_items_text(state.get("request", ""))
+        state["room_plans"] = []
+        state["room_image_url"] = ""
+        return state
+
     llm = _get_llm()
     if state.get("room_plans"):
         state["response_text"] = _whole_home_text(
@@ -256,7 +276,7 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
 
     if llm is None:
         lines = [
-            "已根据你的需求生成宜家家具组合建议：",
+            "已根据你的需求生成家具组合建议：",
             "",
             f"空间判断：{_describe_room(state.get('request', ''))}",
             f"搭配方向：{_describe_style(state.get('request', ''), state.get('preferences', {}))}",
@@ -268,13 +288,16 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
             ],
             "",
             "建议购买：",
-            *[f"- {item.name}: ${item.price:.2f}，{item.reason}" for item in items],
+            *[
+                f"- {item.name}: {_money(item.price, item.currency)}，引用：{item.url}，{item.reason}"
+                for item in items
+            ],
             "",
-            f"预计总金额：${total:.2f}",
+            f"预计总金额：{_money(total, pricing.get('currency', 'CNY'))}",
             f"计算说明：{pricing.get('calculation_note', '')}",
         ]
         if state.get("budget") and total > float(state["budget"]):
-            lines.append(f"当前组合超出预算 ${total - float(state['budget']):.2f}，建议先保留核心家具。")
+            lines.append(f"当前组合超出预算 {_money(total - float(state['budget']), pricing.get('currency', 'CNY'))}，建议先保留核心家具。")
         state["response_text"] = "\n".join(lines)
         return state
 
@@ -367,11 +390,32 @@ def _describe_style(request: str, preferences: dict[str, Any]) -> str:
     return "简洁耐看，尽量选择后续容易替换和扩展的基础款。"
 
 
+def _money(value: float, currency: str | None = "CNY") -> str:
+    if currency == "USD":
+        return f"${float(value):.2f}"
+    if currency == "CNY" or not currency:
+        return f"¥{float(value):.2f}"
+    return f"{float(value):.2f} {currency}"
+
+
+def _no_items_text(request: str) -> str:
+    return (
+        "我先不生成家具清单。\n\n"
+        "这次没有找到同时满足需求、带明确价格、并且有官网引用链接的家具商品。"
+        "为了保证方案里的每件家具都有来源，我不会自行编造商品、价格或链接。\n\n"
+        "你可以补充或调整：\n"
+        "- 减少必选家具，或换成客厅/卧室核心家具。\n"
+        "- 放宽预算或减少核心家具数量。\n"
+        "- 明确房间类型、面积/长宽、风格和必须购买的家具。"
+    )
+
+
 def _detect_target_rooms(
     request: str,
     notes: str,
     is_pdf: bool,
 ) -> list[dict[str, str]]:
+    request_text = request.lower()
     text = f"{request} {notes}".lower()
     room_defs = [
         ("客厅", "living", ["客厅", "living room", "living"]),
@@ -380,7 +424,35 @@ def _detect_target_rooms(
         ("餐厅", "dining", ["餐厅", "dining"]),
         ("书房", "study", ["书房", "study", "office"]),
     ]
-    whole_home = is_pdf or any(token in text for token in ["整套", "全屋", "户型", "户型图", "apartment", "whole home"])
+    explicit_whole_home = any(
+        token in request_text
+        for token in [
+            "整套",
+            "全屋",
+            "全套",
+            "套房",
+            "套房方案",
+            "整个房子",
+            "整个家",
+            "所有房间",
+            "多个空间",
+            "每个房间",
+            "客厅卧室",
+            "卧室客厅",
+            "whole home",
+            "entire home",
+            "whole apartment",
+        ]
+    )
+    single_room_cues = [
+        {"name": name, "type": room_type}
+        for name, room_type, tokens in room_defs
+        if any(token in request_text for token in tokens)
+    ]
+    if single_room_cues and not explicit_whole_home:
+        return [single_room_cues[0]]
+
+    whole_home = explicit_whole_home or (is_pdf and not single_room_cues)
     rooms = [
         {"name": name, "type": room_type}
         for name, room_type, tokens in room_defs
@@ -421,8 +493,11 @@ def _room_plan_text(
         "摆放：",
         *[f"- {placement.item_name}: {placement.note}" for placement in placements],
         "购买：",
-        *[f"- {item.name}: ${item.price:.2f}，{item.reason}" for item in items],
-        f"小计：${float(pricing['total']):.2f}",
+        *[
+            f"- {item.name}: {_money(item.price, item.currency)}，引用：{item.url}，{item.reason}"
+            for item in items
+        ],
+        f"小计：{_money(float(pricing['total']), pricing.get('currency', 'CNY'))}",
     ]
     return "\n".join(lines)
 
@@ -448,11 +523,11 @@ def _whole_home_text(
             ]
         )
     total = float(pricing["total"])
-    lines.append(f"整套预计总金额：${total:.2f}")
+    lines.append(f"整套预计总金额：{_money(total, pricing.get('currency', 'CNY'))}")
     lines.append(str(pricing.get("calculation_note", "")))
     if budget and total > float(budget):
-        lines.append(f"当前方案超出预算 ${total - float(budget):.2f}，建议先保留卧室/客厅核心家具，再分阶段补厨房和软装。")
-    lines.append("购买前请逐项核验 IKEA 官网价格、库存、尺寸、配送和安装条件。")
+        lines.append(f"当前方案超出预算 {_money(total - float(budget), pricing.get('currency', 'CNY'))}，建议先保留卧室/客厅核心家具，再分阶段补厨房和软装。")
+    lines.append("购买前请逐项核验官网的价格、库存、尺寸、配送和安装条件。")
     return "\n".join(lines)
 
 
@@ -534,6 +609,7 @@ async def run_furniture_assistant(
         room_image_url=final_state.get("room_image_url", ""),
         room_plans=final_state.get("room_plans", []),
         total=final_state.get("total", calculate_cart_total(items)["total"]),
+        currency=final_state.get("pricing", {}).get("currency", "CNY"),
         budget=budget,
         preferences=final_state.get("preferences", {}),
         image_notes=final_state.get("image_notes", ""),
@@ -559,7 +635,7 @@ async def stream_furniture_assistant(
         "load_user_context": "正在读取你的历史偏好...",
         "understand_image": "正在理解图片和空间线索...",
         "detect_target_rooms": "正在判断是单房间还是整套房...",
-        "search_candidates": "正在搜索并筛选宜家家具...",
+        "search_candidates": "正在搜索并筛选带价格和引用链接的官网家具...",
         "build_room_plans": "正在为整套房逐个空间生成建议...",
         "plan_layout_and_generate_room": "正在规划家具摆放并生成整体效果图...",
         "calculate_total": "正在用价格计算工具核算总金额...",
@@ -605,6 +681,7 @@ async def stream_furniture_assistant(
                     "type": "room_plans",
                     "room_plans": [plan.model_dump() for plan in final_state.get("room_plans", [])],
                     "total": final_state.get("total", 0.0),
+                    "currency": final_state.get("pricing", {}).get("currency", "CNY"),
                 }
             if node_name == "generate_recommendation":
                 yield {
@@ -625,6 +702,7 @@ async def stream_furniture_assistant(
             room_image_url=final_state.get("room_image_url", ""),
             room_plans=final_state.get("room_plans", []),
             total=final_state.get("total", calculate_cart_total(items)["total"]),
+            currency=final_state.get("pricing", {}).get("currency", "CNY"),
             budget=budget,
             preferences=final_state.get("preferences", {}),
             image_notes=final_state.get("image_notes", ""),

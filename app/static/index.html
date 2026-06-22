@@ -4,48 +4,60 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>家具选择助手</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=5" />
   </head>
   <body>
     <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">HPU-DCSI5800 · Furniture Planning Assistant</p>
+          <h1>家具选择助手</h1>
+        </div>
+        <div class="identity-pill">
+          <span id="identityName">游客模式</span>
+          <small id="identityStatus">正在准备会话...</small>
+        </div>
+      </header>
+
       <section class="workspace">
         <aside class="panel">
-          <div>
-            <p class="eyebrow">Furniture Assistant</p>
-            <h1>家具选择助手</h1>
-          </div>
+          <section class="identity-box">
+            <h2>身份</h2>
+            <label>
+              账户名称
+              <input id="accountName" placeholder="例如 zhangsan" autocomplete="username" />
+            </label>
+            <div class="button-row">
+              <button id="loginBtn" type="button">使用账户</button>
+              <button id="guestBtn" class="secondary" type="button">游客模式</button>
+            </div>
+            <input id="uid" type="hidden" />
+          </section>
 
-          <label>
-            用户 UID
-            <input id="uid" placeholder="点击注册生成" />
-          </label>
-          <button id="registerBtn" type="button">注册新用户</button>
+          <section class="settings-box">
+            <h2>约束</h2>
+            <label>
+              预算
+              <input id="budget" type="number" min="0" step="1" placeholder="例如 8000" />
+            </label>
 
-          <label>
-            预算
-            <input id="budget" type="number" min="0" step="1" placeholder="例如 800" />
-          </label>
-
-          <label>
-            空间图片 / 户型 PDF
-            <input id="image" type="file" accept="image/*,.pdf,application/pdf" />
-          </label>
+            <label>
+              空间图片 / 户型 PDF
+              <input id="image" type="file" accept="image/*,.pdf,application/pdf" />
+            </label>
+          </section>
         </aside>
 
         <section class="composer">
-          <form id="recommendForm">
-            <label>
-              需求
-              <textarea
-                id="request"
-                rows="7"
-                placeholder="例如：我想布置一个小户型客厅，喜欢北欧、浅木色，需要沙发、茶几和储物。"
-              ></textarea>
-            </label>
-            <button id="submitBtn" type="submit">生成推荐</button>
-          </form>
-
           <section id="result" class="result hidden">
+            <div class="summary">
+              <p id="total"></p>
+              <div id="chatOutput" class="chat-output"></div>
+              <div class="download-actions">
+                <button id="downloadMarkdownBtn" class="secondary hidden" type="button">下载 Markdown 方案</button>
+                <button id="downloadPdfBtn" class="secondary hidden" type="button">下载 PDF 方案</button>
+              </div>
+            </div>
             <div id="roomPreview" class="room-preview hidden">
               <img id="roomImage" class="hidden" alt="整体家具摆放效果图" />
               <div>
@@ -55,16 +67,21 @@
               </div>
             </div>
             <div id="roomPlans" class="room-plans hidden"></div>
-            <div class="summary">
-              <h2>推荐结果</h2>
-              <p id="total"></p>
-              <pre id="text"></pre>
-            </div>
             <div id="items" class="items"></div>
           </section>
+
+          <form id="recommendForm" class="chat-composer">
+            <label class="sr-only" for="request">需求</label>
+            <textarea
+              id="request"
+              rows="3"
+              placeholder="输入你的需求，例如：只给我一个卧室方案，20 平，4x5，喜欢温馨木色，预算 8000。"
+            ></textarea>
+            <button id="submitBtn" type="submit">发送</button>
+          </form>
         </section>
       </section>
     </main>
-    <script src="/static/app.js?v=6"></script>
+    <script src="/static/app.js?v=20"></script>
   </body>
 </html>

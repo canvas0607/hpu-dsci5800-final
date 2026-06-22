@@ -46,4 +46,4 @@ def _money(value: float | int | Decimal) -> Decimal:
 
 def _resolve_currency(items: list[FurnitureItem]) -> str:
     currencies = [item.currency for item in items if item.currency]
-    return currencies[0] if currencies else "USD"
+    return currencies[0] if currencies else "CNY"

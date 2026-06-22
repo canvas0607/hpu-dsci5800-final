@@ -13,7 +13,8 @@ class FurnitureItem(BaseModel):
     name: str
     category: str = "furniture"
     price: float = 0.0
-    currency: str = "USD"
+    currency: str = "CNY"
+    brand: str = ""
     url: str = ""
     image_url: str = ""
     reason: str = ""
@@ -39,7 +40,7 @@ class RoomPlan(BaseModel):
     placements: list[FurniturePlacement] = Field(default_factory=list)
     room_image_url: str = ""
     total: float = 0.0
-    currency: str = "USD"
+    currency: str = "CNY"
 
 
 class RecommendationResponse(BaseModel):
@@ -50,7 +51,7 @@ class RecommendationResponse(BaseModel):
     room_image_url: str = ""
     room_plans: list[RoomPlan] = Field(default_factory=list)
     total: float
-    currency: str = "USD"
+    currency: str = "CNY"
     budget: float | None = None
     preferences: dict[str, Any] = Field(default_factory=dict)
     image_notes: str = ""

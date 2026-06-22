@@ -1,39 +1,77 @@
 const uidInput = document.querySelector("#uid");
+const accountNameInput = document.querySelector("#accountName");
 const budgetInput = document.querySelector("#budget");
 const imageInput = document.querySelector("#image");
 const requestInput = document.querySelector("#request");
-const registerBtn = document.querySelector("#registerBtn");
+const loginBtn = document.querySelector("#loginBtn");
+const guestBtn = document.querySelector("#guestBtn");
 const submitBtn = document.querySelector("#submitBtn");
 const form = document.querySelector("#recommendForm");
 const result = document.querySelector("#result");
 const total = document.querySelector("#total");
-const text = document.querySelector("#text");
+const identityName = document.querySelector("#identityName");
+const identityStatus = document.querySelector("#identityStatus");
+const chatOutput = document.querySelector("#chatOutput");
 const items = document.querySelector("#items");
 const roomPreview = document.querySelector("#roomPreview");
 const roomImage = document.querySelector("#roomImage");
 const placements = document.querySelector("#placements");
 const renderNote = document.querySelector("#renderNote");
 const roomPlans = document.querySelector("#roomPlans");
+const downloadMarkdownBtn = document.querySelector("#downloadMarkdownBtn");
+const downloadPdfBtn = document.querySelector("#downloadPdfBtn");
+let latestMarkdown = "";
+let latestPlanData = null;
+let currentIdentity = null;
+let latestUserRequest = "";
 
-const savedUid = localStorage.getItem("furniture_uid");
-if (savedUid) uidInput.value = savedUid;
+initIdentity();
 
-registerBtn.addEventListener("click", async () => {
-  registerBtn.disabled = true;
+loginBtn.addEventListener("click", async () => {
+  const accountName = accountNameInput.value.trim();
+  if (!accountName) {
+    setIdentityStatus("请输入账户名称");
+    accountNameInput.focus();
+    return;
+  }
+  loginBtn.disabled = true;
   try {
-    await createUid();
+    const accountMap = getAccountMap();
+    const uid = accountMap[accountName] || await createUid();
+    accountMap[accountName] = uid;
+    localStorage.setItem("furniture_account_uids", JSON.stringify(accountMap));
+    setIdentity({ type: "account", name: accountName, uid });
   } finally {
-    registerBtn.disabled = false;
+    loginBtn.disabled = false;
+  }
+});
+
+guestBtn.addEventListener("click", async () => {
+  guestBtn.disabled = true;
+  try {
+    const guest = buildGuestName();
+    setIdentity({ type: "guest", name: guest, uid: "" }, "正在准备游客会话...");
+    const uid = await createUid();
+    setIdentity({ type: "guest", name: guest, uid });
+  } finally {
+    guestBtn.disabled = false;
   }
 });
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const requestText = requestInput.value.trim();
   submitBtn.disabled = true;
-  submitBtn.textContent = "生成中...";
+  submitBtn.textContent = "发送中...";
   result.classList.remove("hidden");
-  total.textContent = "正在连接推荐流...";
-  text.textContent = "";
+  total.textContent = "";
+  latestUserRequest = requestText;
+  chatOutput.innerHTML = "";
+  renderChat("正在连接推荐流...", { status: true });
+  latestMarkdown = "";
+  latestPlanData = null;
+  downloadMarkdownBtn.classList.add("hidden");
+  downloadPdfBtn.classList.add("hidden");
   items.innerHTML = "";
   placements.innerHTML = "";
   roomPreview.classList.add("hidden");
@@ -45,10 +83,12 @@ form.addEventListener("submit", async (event) => {
   roomPlans.innerHTML = "";
 
   const formData = new FormData();
-  formData.append("uid", await ensureUid());
-  formData.append("request", requestInput.value.trim());
+  const uid = await ensureUid();
+  formData.append("uid", uid);
+  formData.append("request", requestText);
   if (budgetInput.value) formData.append("budget", budgetInput.value);
   if (imageInput.files[0]) formData.append("image", imageInput.files[0]);
+  requestInput.value = "";
 
   try {
     const response = await fetch("/api/recommend/stream", {
@@ -63,11 +103,11 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     result.classList.remove("hidden");
     total.textContent = "";
-    text.textContent = error.message;
+    renderChat(error.message);
     items.innerHTML = "";
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = "生成推荐";
+    submitBtn.textContent = "发送";
   }
 });
 
@@ -105,7 +145,7 @@ async function readRecommendationStream(response) {
 
 function handleStreamEvent(payload) {
   if (payload.type === "status") {
-    total.textContent = payload.message || "处理中...";
+    renderChat(payload.message || "处理中...", { status: true });
     return;
   }
   if (payload.type === "items") {
@@ -118,12 +158,25 @@ function handleStreamEvent(payload) {
   }
   if (payload.type === "room_plans") {
     renderRoomPlans(payload.room_plans || []);
-    total.textContent = `整套预计总金额：$${Number(payload.total || 0).toFixed(2)}`;
+    total.textContent = `整套预计总金额：${formatMoney(payload.total || 0, payload.currency || "CNY")}`;
     return;
   }
   if (payload.type === "summary") {
-    total.textContent = `预计总金额：$${Number(payload.total || 0).toFixed(2)}`;
-    text.textContent = payload.text || "";
+    total.textContent = `预计总金额：${formatMoney(payload.total || 0, payload.pricing?.currency || "CNY")}`;
+    latestMarkdown = payload.text || "";
+    renderChat(latestMarkdown);
+    return;
+  }
+  if (payload.type === "clarify" || payload.type === "refuse") {
+    total.textContent = "";
+    latestMarkdown = "";
+    latestPlanData = null;
+    renderChat(payload.message || "");
+    downloadMarkdownBtn.classList.add("hidden");
+    downloadPdfBtn.classList.add("hidden");
+    roomPreview.classList.add("hidden");
+    roomPlans.classList.add("hidden");
+    items.innerHTML = "";
     return;
   }
   if (payload.type === "final") {
@@ -136,11 +189,17 @@ function handleStreamEvent(payload) {
 }
 
 function renderResult(data) {
-  uidInput.value = data.uid;
-  localStorage.setItem("furniture_uid", data.uid);
+  if (data.uid && currentIdentity) {
+    setIdentity({ ...currentIdentity, uid: data.uid });
+  }
   result.classList.remove("hidden");
-  total.textContent = `预计总金额：$${Number(data.total || 0).toFixed(2)}`;
-  text.textContent = data.text;
+  const currency = data.currency || data.items?.[0]?.currency || "CNY";
+  total.textContent = `预计总金额：${formatMoney(data.total || 0, currency)}`;
+  latestMarkdown = buildMarkdownPlan(data);
+  latestPlanData = data;
+  renderChat(data.text || latestMarkdown);
+  downloadMarkdownBtn.classList.toggle("hidden", !latestMarkdown);
+  downloadPdfBtn.classList.toggle("hidden", !latestPlanData);
   if (data.room_plans && data.room_plans.length > 1) {
     renderRoomPlans(data.room_plans);
     roomPreview.classList.add("hidden");
@@ -152,9 +211,12 @@ function renderResult(data) {
 }
 
 async function ensureUid() {
-  const currentUid = uidInput.value.trim();
-  if (currentUid) return currentUid;
-  return createUid();
+  if (currentIdentity?.uid) return currentIdentity.uid;
+  const identity = currentIdentity || { type: "guest", name: buildGuestName(), uid: "" };
+  setIdentity(identity, "正在准备会话...");
+  const uid = await createUid();
+  setIdentity({ ...identity, uid });
+  return uid;
 }
 
 async function createUid() {
@@ -164,9 +226,62 @@ async function createUid() {
     throw new Error(formatApiError(error.detail));
   }
   const data = await response.json();
-  uidInput.value = data.uid;
-  localStorage.setItem("furniture_uid", data.uid);
   return data.uid;
+}
+
+async function initIdentity() {
+  const saved = readJson("furniture_identity");
+  if (saved?.uid && saved?.name) {
+    setIdentity(saved);
+    if (saved.type === "account") accountNameInput.value = saved.name;
+    return;
+  }
+
+  const legacyUid = localStorage.getItem("furniture_uid");
+  if (legacyUid) {
+    setIdentity({ type: "guest", name: buildGuestName(), uid: legacyUid });
+    return;
+  }
+
+  const guest = buildGuestName();
+  setIdentity({ type: "guest", name: guest, uid: "" }, "正在准备游客会话...");
+  try {
+    const uid = await createUid();
+    setIdentity({ type: "guest", name: guest, uid });
+  } catch (error) {
+    setIdentityStatus("游客模式，提交时会再次准备会话");
+  }
+}
+
+function setIdentity(identity, statusText = "") {
+  currentIdentity = identity;
+  uidInput.value = identity.uid || "";
+  identityName.textContent = identity.type === "account" ? `账户：${identity.name}` : identity.name;
+  setIdentityStatus(statusText || (identity.uid ? "会话已就绪" : "会话待准备"));
+  localStorage.setItem("furniture_identity", JSON.stringify(identity));
+  if (identity.uid) localStorage.setItem("furniture_uid", identity.uid);
+}
+
+function setIdentityStatus(message) {
+  identityStatus.textContent = message;
+}
+
+function buildGuestName() {
+  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `游客-${suffix}`;
+}
+
+function getAccountMap() {
+  return readJson("furniture_account_uids") || {};
+}
+
+function readJson(key) {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatApiError(detail) {
@@ -184,18 +299,152 @@ function renderItems(nextItems) {
   items.innerHTML = "";
 
   for (const item of nextItems) {
+    const sourceReason = cleanSourceReason(item.reason || "");
     const card = document.createElement("article");
     card.className = "item";
     card.innerHTML = `
       <div class="item-body">
         <h3>${escapeHtml(item.name)}</h3>
-        <p>$${Number(item.price || 0).toFixed(2)} · ${escapeHtml(item.category || "furniture")}</p>
-        <p>${escapeHtml(item.reason || "")}</p>
-        <a href="${escapeHtml(item.url || "https://www.ikea.com/us/en/")}" target="_blank" rel="noreferrer">查看商品</a>
+        <p>${formatMoney(item.price || 0, item.currency || "CNY")} · ${escapeHtml(item.category || "furniture")}</p>
+        ${sourceReason ? `<p>${escapeHtml(sourceReason)}</p>` : ""}
+        <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noreferrer">查看引用</a>
       </div>
     `;
     items.appendChild(card);
   }
+}
+
+function cleanSourceReason(reason) {
+  const normalized = String(reason || "").replace(/\s+/g, " ").trim();
+  const noisyTerms = [
+    "中文 | EN",
+    "所有商品",
+    "活动和特惠",
+    "设计和服务",
+    "家居灵感",
+    "扫码下载",
+    "宜家APP",
+    "召回",
+    "批次",
+    "隐私政策",
+  ];
+  if (noisyTerms.some((term) => normalized.includes(term))) return "";
+  return normalized;
+}
+
+downloadMarkdownBtn.addEventListener("click", () => {
+  if (!latestMarkdown) return;
+  const blob = new Blob([latestMarkdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `furniture-plan-${new Date().toISOString().slice(0, 10)}.md`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+downloadPdfBtn.addEventListener("click", async () => {
+  if (!latestPlanData) return;
+  downloadPdfBtn.disabled = true;
+  const originalText = downloadPdfBtn.textContent;
+  downloadPdfBtn.textContent = "生成 PDF...";
+  try {
+    const response = await fetch("/api/plan/pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(latestPlanData),
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(error || "PDF 生成失败");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `furniture-plan-${new Date().toISOString().slice(0, 10)}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    renderChat(`PDF 生成失败：${error.message}`);
+  } finally {
+    downloadPdfBtn.disabled = false;
+    downloadPdfBtn.textContent = originalText;
+  }
+});
+
+function renderChat(markdownText, options = {}) {
+  chatOutput.innerHTML = "";
+  if (latestUserRequest) {
+    const userMessage = document.createElement("div");
+    userMessage.className = "chat-message user-message";
+    userMessage.textContent = latestUserRequest;
+    chatOutput.appendChild(userMessage);
+  }
+  const blocks = String(markdownText || "")
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  for (const block of blocks) {
+    const message = document.createElement("div");
+    message.className = options.status ? "chat-message status-message" : "chat-message";
+    message.innerHTML = inlineChatMarkup(block);
+    chatOutput.appendChild(message);
+  }
+  chatOutput.scrollIntoView({ block: "end", behavior: "smooth" });
+}
+
+function inlineChatMarkup(block) {
+  const normalized = escapeHtml(block)
+    .replace(/^#{1,4}\s*/gm, "")
+    .replace(/^\-\s*/gm, "• ")
+    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br />");
+  return normalized;
+}
+
+function buildMarkdownPlan(data) {
+  const currency = data.currency || "CNY";
+  const lines = [
+    "# 家具搭配方案",
+    "",
+    data.text || "",
+    "",
+    `**预计总金额：${formatMoney(data.total || 0, currency)}**`,
+  ];
+  if (data.room_plans && data.room_plans.length) {
+    lines.push("\n## 分房间商品清单");
+    for (const plan of data.room_plans) {
+      lines.push(`\n### ${plan.room_name}`);
+      if (plan.items?.length) {
+        lines.push("| 商品 | 品类 | 价格 | 链接 |");
+        lines.push("|---|---|---:|---|");
+        for (const item of plan.items) {
+          lines.push(`| ${item.name} | ${item.category} | ${formatMoney(item.price, item.currency || "CNY")} | ${item.url || ""} |`);
+        }
+      }
+    }
+  } else if (data.items?.length) {
+    lines.push("\n## 商品清单");
+    lines.push("| 商品 | 品类 | 价格 | 链接 |");
+    lines.push("|---|---|---:|---|");
+    for (const item of data.items) {
+      lines.push(`| ${item.name} | ${item.category} | ${formatMoney(item.price, item.currency || "CNY")} | ${item.url || ""} |`);
+    }
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+function formatMoney(value, currency) {
+  const amount = Number(value || 0).toFixed(2);
+  if (currency === "CNY") return `¥${amount}`;
+  if (currency === "USD") return `$${amount}`;
+  return `${amount} ${currency || ""}`.trim();
 }
 
 function renderRoom(imageUrl, nextPlacements) {
@@ -257,10 +506,19 @@ function renderRoomPlans(plans) {
       <h3>${escapeHtml(plan.room_name || "空间方案")}</h3>
       ${image}
       <div class="placements">${placementRows}</div>
-      <pre>${escapeHtml(plan.text || "")}</pre>
+      <div class="chat-output room-chat">${chatBlocks(plan.text || "")}</div>
     `;
     roomPlans.appendChild(section);
   }
+}
+
+function chatBlocks(markdownText) {
+  return String(markdownText || "")
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => `<div class="chat-message">${inlineChatMarkup(block)}</div>`)
+    .join("");
 }
 
 function escapeHtml(value) {

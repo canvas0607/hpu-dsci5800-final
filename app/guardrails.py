@@ -28,19 +28,9 @@ FURNITURE_TERMS = [
     "家具",
     "宜家",
     "ikea",
-    "源氏木语",
-    "yeswood",
-    "林氏",
-    "林氏家居",
-    "林氏木业",
-    "顾家",
-    "顾家家居",
-    "kuka",
-    "芝华仕",
-    "芝华士",
-    "cheers",
-    "无印良品",
-    "muji",
+    "套房",
+    "整套",
+    "全屋",
     "房间",
     "空间",
     "布置",
@@ -79,6 +69,8 @@ ROOM_TERMS = [
     "玄关",
     "全屋",
     "整套",
+    "套房",
+    "套房方案",
     "房间",
     "living",
     "bedroom",
@@ -137,7 +129,7 @@ def preflight_request(request: str, has_upload: bool = False) -> PreflightResult
         return PreflightResult(
             action="refuse",
             message=(
-                "我目前只处理家具选择、空间摆放、预算和官方渠道商品组合相关请求。\n\n"
+                "我目前只处理家具选择、空间摆放、预算和带官网引用的商品组合相关请求。\n\n"
                 "你可以这样问：给我一个 20 平卧室方案，预算 8000，喜欢温馨木色。"
             ),
         )
@@ -155,7 +147,7 @@ def preflight_request(request: str, has_upload: bool = False) -> PreflightResult
                 "我先不生成方案。还需要你确认几个关键条件：\n\n"
                 + "\n".join(f"- {item}" for item in missing)
                 + "\n- 可选：预算、风格偏好、已有家具、是否租房、是否有儿童或宠物。\n\n"
-                "确认后我再搜索带价格和链接的官方渠道商品、计算总金额并生成摆放建议。"
+                "确认后我再搜索带价格和链接的官网商品、计算总金额并生成摆放建议。"
             ),
         )
 

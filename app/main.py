@@ -5,11 +5,13 @@ from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agent import close_furniture_graph, run_furniture_assistant, stream_furniture_assistant
+from app.guardrails import PreflightResult, preflight_request
 from app.models import HistoryRecord, RecommendationResponse, UserCreateResponse
+from app.pdf_export import build_plan_pdf
 from app.storage import create_user, ensure_user, get_history, init_db
 
 app = FastAPI(title="Furniture Choice Assistant", version="0.1.0")
@@ -59,6 +61,9 @@ async def recommend(
     ensure_user(uid)
     image_bytes = await image.read() if image else None
     image_mime = image.content_type if image else ""
+    preflight = preflight_request(request, has_upload=image is not None)
+    if preflight.should_stop:
+        return _guardrail_response(uid=uid, budget=budget, preflight=preflight)
     return await run_furniture_assistant(
         uid=uid,
         request=request,
@@ -82,9 +87,23 @@ async def recommend_stream(
     ensure_user(uid)
     image_bytes = await image.read() if image else None
     image_mime = image.content_type if image else ""
+    preflight = preflight_request(request, has_upload=image is not None)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
+            if preflight.should_stop:
+                yield _sse(
+                    {
+                        "type": preflight.action,
+                        "message": preflight.message,
+                        "data": _guardrail_response(
+                            uid=uid,
+                            budget=budget,
+                            preflight=preflight,
+                        ).model_dump(),
+                    }
+                )
+                return
             async for event in stream_furniture_assistant(
                 uid=uid,
                 request=request,
@@ -111,5 +130,35 @@ async def history(uid: str) -> list[HistoryRecord]:
     return [HistoryRecord(**row) for row in get_history(uid)]
 
 
+@app.post("/api/plan/pdf")
+async def plan_pdf(plan: RecommendationResponse) -> Response:
+    pdf_bytes = build_plan_pdf(plan)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="furniture-plan.pdf"'},
+    )
+
+
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _guardrail_response(
+    uid: str,
+    budget: float | None,
+    preflight: PreflightResult,
+) -> RecommendationResponse:
+    return RecommendationResponse(
+        uid=uid,
+        text=preflight.message,
+        items=[],
+        placements=[],
+        room_image_url="",
+        room_plans=[],
+        total=0.0,
+        currency="CNY",
+        budget=budget,
+        preferences={},
+        image_notes="",
+    )
