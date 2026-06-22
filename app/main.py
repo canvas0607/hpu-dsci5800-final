@@ -48,7 +48,7 @@ async def register() -> UserCreateResponse:
 @app.post("/api/recommend", response_model=RecommendationResponse)
 async def recommend(
     uid: str = Form(""),
-    request: str = Form(...),
+    request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
 ) -> RecommendationResponse:
@@ -71,7 +71,7 @@ async def recommend(
 @app.post("/api/recommend/stream")
 async def recommend_stream(
     uid: str = Form(""),
-    request: str = Form(...),
+    request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
 ) -> StreamingResponse:

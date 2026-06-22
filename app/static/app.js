@@ -13,6 +13,7 @@ const roomPreview = document.querySelector("#roomPreview");
 const roomImage = document.querySelector("#roomImage");
 const placements = document.querySelector("#placements");
 const renderNote = document.querySelector("#renderNote");
+const roomPlans = document.querySelector("#roomPlans");
 
 const savedUid = localStorage.getItem("furniture_uid");
 if (savedUid) uidInput.value = savedUid;
@@ -40,6 +41,8 @@ form.addEventListener("submit", async (event) => {
   roomImage.removeAttribute("src");
   renderNote.classList.add("hidden");
   renderNote.textContent = "";
+  roomPlans.classList.add("hidden");
+  roomPlans.innerHTML = "";
 
   const formData = new FormData();
   formData.append("uid", await ensureUid());
@@ -113,6 +116,11 @@ function handleStreamEvent(payload) {
     renderRoom(payload.room_image_url || "", payload.placements || []);
     return;
   }
+  if (payload.type === "room_plans") {
+    renderRoomPlans(payload.room_plans || []);
+    total.textContent = `整套预计总金额：$${Number(payload.total || 0).toFixed(2)}`;
+    return;
+  }
   if (payload.type === "summary") {
     total.textContent = `预计总金额：$${Number(payload.total || 0).toFixed(2)}`;
     text.textContent = payload.text || "";
@@ -133,7 +141,13 @@ function renderResult(data) {
   result.classList.remove("hidden");
   total.textContent = `预计总金额：$${Number(data.total || 0).toFixed(2)}`;
   text.textContent = data.text;
-  renderRoom(data.room_image_url || "", data.placements || []);
+  if (data.room_plans && data.room_plans.length > 1) {
+    renderRoomPlans(data.room_plans);
+    roomPreview.classList.add("hidden");
+  } else {
+    renderRoom(data.room_image_url || "", data.placements || []);
+    roomPlans.classList.add("hidden");
+  }
   renderItems(data.items || []);
 }
 
@@ -212,6 +226,40 @@ function renderRoom(imageUrl, nextPlacements) {
       <span>${escapeHtml(placement.zone || "")} · ${escapeHtml(placement.note || "")}</span>
     `;
     placements.appendChild(row);
+  }
+}
+
+function renderRoomPlans(plans) {
+  if (!plans.length) {
+    roomPlans.classList.add("hidden");
+    return;
+  }
+  roomPlans.classList.remove("hidden");
+  roomPlans.innerHTML = "";
+
+  for (const plan of plans) {
+    const section = document.createElement("section");
+    section.className = "room-plan";
+    const image = plan.room_image_url
+      ? `<img src="${escapeHtml(plan.room_image_url)}" alt="${escapeHtml(plan.room_name)}整体效果图" class="room-plan-image" />`
+      : `<p class="render-note">未配置图片生成模型，当前只展示 ${escapeHtml(plan.room_name)} 的摆放方案。</p>`;
+    const placementRows = (plan.placements || [])
+      .map(
+        (placement) => `
+          <div class="placement">
+            <strong>${escapeHtml(placement.item_name || "")}</strong>
+            <span>${escapeHtml(placement.zone || "")} · ${escapeHtml(placement.note || "")}</span>
+          </div>
+        `
+      )
+      .join("");
+    section.innerHTML = `
+      <h3>${escapeHtml(plan.room_name || "空间方案")}</h3>
+      ${image}
+      <div class="placements">${placementRows}</div>
+      <pre>${escapeHtml(plan.text || "")}</pre>
+    `;
+    roomPlans.appendChild(section);
   }
 }
 

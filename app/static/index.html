@@ -27,8 +27,8 @@
           </label>
 
           <label>
-            空间图片
-            <input id="image" type="file" accept="image/*" />
+            空间图片 / 户型 PDF
+            <input id="image" type="file" accept="image/*,.pdf,application/pdf" />
           </label>
         </aside>
 
@@ -54,6 +54,7 @@
                 <div id="placements" class="placements"></div>
               </div>
             </div>
+            <div id="roomPlans" class="room-plans hidden"></div>
             <div class="summary">
               <h2>推荐结果</h2>
               <p id="total"></p>
@@ -64,6 +65,6 @@
         </section>
       </section>
     </main>
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=6"></script>
   </body>
 </html>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -104,25 +105,66 @@ QUERY_SYNONYMS = {
 ROOM_CATEGORY_PLAN = {
     "bedroom": ["bed", "nightstand", "lamp", "rug", "wardrobe", "storage"],
     "living": ["sofa", "table", "storage", "chair", "lamp", "rug"],
+    "kitchen": ["storage", "table", "chair", "lamp"],
+    "dining": ["table", "chair", "storage", "lamp"],
+    "study": ["table", "chair", "storage", "lamp"],
 }
+
+CATEGORY_SEARCH_TERMS = {
+    "bed": "MALM bed frame OR TARVA bed frame",
+    "nightstand": "TARVA nightstand OR HEMNES nightstand",
+    "lamp": "RANARP work lamp OR table lamp",
+    "rug": "LOHALS rug OR VINDUM rug",
+    "wardrobe": "BRIMNES wardrobe OR PAX wardrobe",
+    "storage": "KALLAX shelf unit OR storage shelf",
+    "sofa": "LINANAS sofa OR sofa",
+    "table": "LACK coffee table OR coffee table",
+    "chair": "POANG armchair OR armchair",
+}
+
+CATEGORY_MATCH_TERMS = {
+    "bed": ["bed", "bed frame", "床"],
+    "nightstand": ["nightstand", "bedside", "bedside table"],
+    "lamp": ["lamp", "light", "lighting"],
+    "rug": ["rug", "mat"],
+    "wardrobe": ["wardrobe", "closet"],
+    "storage": ["storage", "shelf", "shelving", "cabinet"],
+    "sofa": ["sofa", "couch", "loveseat"],
+    "table": ["coffee table", "side table", "table"],
+    "chair": ["chair", "armchair"],
+}
+
+NON_PRODUCT_URL_PARTS = [
+    "/cat/",
+    "/categories/",
+    "/rooms/",
+    "/ideas/",
+    "/inspiration/",
+    "/search/",
+    "/planner",
+    "/customer-service/",
+    "/campaigns/",
+    "/new/",
+    "/offers/",
+]
 
 
 async def search_ikea_furniture(
     query: str, budget: float | None, preferences: dict[str, Any]
 ) -> list[FurnitureItem]:
+    query_text = f"{query} {preferences}".lower()
+    room = _infer_room(query_text)
     tavily_key = os.getenv("TAVILY_API_KEY")
     if tavily_key:
-        items = await _search_with_tavily(tavily_key, query)
+        items = await _search_with_tavily(tavily_key, query, room)
         if items:
             return _fit_budget(items, budget)
 
-    query_text = f"{query} {preferences}".lower()
     scored = sorted(
         DEMO_IKEA_ITEMS,
         key=lambda item: _score_item(item, query_text),
         reverse=True,
     )
-    room = _infer_room(query_text)
     if room:
         planned = _select_for_room(scored, ROOM_CATEGORY_PLAN[room], budget)
         if planned:
@@ -130,39 +172,142 @@ async def search_ikea_furniture(
     return _fit_budget(scored, budget)
 
 
-async def _search_with_tavily(api_key: str, query: str) -> list[FurnitureItem]:
+async def _search_with_tavily(api_key: str, query: str, room: str) -> list[FurnitureItem]:
+    categories = ROOM_CATEGORY_PLAN.get(room) or _infer_categories(query)
+    found: list[FurnitureItem] = []
+    seen_urls: set[str] = set()
+    async with httpx.AsyncClient(timeout=20) as client:
+        for category in categories:
+            category_items = await _search_category_with_tavily(
+                client=client,
+                api_key=api_key,
+                user_query=query,
+                category=category,
+            )
+            for item in category_items:
+                if item.url in seen_urls:
+                    continue
+                seen_urls.add(item.url)
+                found.append(item)
+                break
+            if len(found) >= 6:
+                break
+    return found
+
+
+async def _search_category_with_tavily(
+    client: httpx.AsyncClient,
+    api_key: str,
+    user_query: str,
+    category: str,
+) -> list[FurnitureItem]:
+    term = CATEGORY_SEARCH_TERMS.get(category, category)
     payload = {
         "api_key": api_key,
-        "query": f"site:ikea.com/us/en {query} furniture price image",
+        "query": (
+            f"site:ikea.com/us/en/p/ IKEA \"{term}\" product page price"
+        ),
         "search_depth": "advanced",
-        "include_images": True,
-        "max_results": 8,
+        "include_images": False,
+        "max_results": 6,
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post("https://api.tavily.com/search", json=payload)
-        response.raise_for_status()
-        data = response.json()
+    response = await client.post("https://api.tavily.com/search", json=payload)
+    response.raise_for_status()
+    data = response.json()
 
     items: list[FurnitureItem] = []
     for result in data.get("results", []):
+        url = result.get("url") or ""
+        if not _is_ikea_product_url(url):
+            continue
         title = result.get("title") or "IKEA furniture"
         content = result.get("content") or ""
+        if not _matches_category(category, title, content, url):
+            continue
         price = _extract_price(title + " " + content)
+        if price <= 0:
+            price = await _fetch_ikea_product_price(client, url)
+        if price <= 0:
+            continue
         items.append(
             FurnitureItem(
-                name=title[:120],
-                category="furniture",
+                name=_clean_product_title(title),
+                category=category,
                 price=price,
-                url=result.get("url") or "https://www.ikea.com/us/en/",
+                url=url,
                 reason=content[:220],
             )
         )
     return items
 
 
+async def _fetch_ikea_product_price(client: httpx.AsyncClient, url: str) -> float:
+    try:
+        response = await client.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return 0.0
+
+    html = response.text
+    for pattern in [
+        r'"price"\s*:\s*"?([0-9]+(?:\.[0-9]{1,2})?)',
+        r'"salesPrice"\s*:\s*\{[^}]*"numeral"\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)',
+        r'"currentPrice"\s*:\s*\{[^}]*"price"\s*:\s*([0-9]+(?:\.[0-9]{1,2})?)',
+    ]:
+        match = re.search(pattern, html)
+        if match:
+            return float(match.group(1))
+    return 0.0
+
+
 def _extract_price(text: str) -> float:
-    match = re.search(r"\$?\s*(\d+(?:\.\d{1,2})?)", text)
-    return float(match.group(1)) if match else 0.0
+    match = re.search(r"\$\s*(\d{1,4}(?:,\d{3})*(?:\.\d{1,2})?)", text)
+    if not match:
+        return 0.0
+    return float(match.group(1).replace(",", ""))
+
+
+def _clean_product_title(title: str) -> str:
+    cleaned = re.sub(r"\s*-\s*IKEA.*$", "", title, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s*\|\s*IKEA.*$", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned[:120] or "IKEA product"
+
+
+def _is_ikea_product_url(url: str) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if "ikea.com" not in host:
+        return False
+    if any(part in path for part in NON_PRODUCT_URL_PARTS):
+        return False
+    return "/p/" in path
+
+
+def _matches_category(category: str, title: str, content: str, url: str) -> bool:
+    terms = CATEGORY_MATCH_TERMS.get(category, [category])
+    haystack = f"{title} {content} {url}".lower()
+    return any(term in haystack for term in terms)
+
+
+def _infer_categories(query_text: str) -> list[str]:
+    lowered = query_text.lower()
+    categories = [
+        category
+        for category, terms in CATEGORY_SEARCH_TERMS.items()
+        if category in lowered
+        or any(term.lower() in lowered for term in re.split(r"\s+or\s+|\s+", terms, flags=re.IGNORECASE))
+    ]
+    if categories:
+        return categories
+    room = _infer_room(lowered)
+    return ROOM_CATEGORY_PLAN.get(room, ["sofa", "table", "storage", "chair"])
 
 
 def _score_item(item: FurnitureItem, query_text: str) -> int:
@@ -186,6 +331,22 @@ def _score_item(item: FurnitureItem, query_text: str) -> int:
 
 
 def _infer_room(query_text: str) -> str:
+    if any(token in query_text for token in ["当前房间：厨房", "房间:厨房", "房间：厨房"]):
+        return "kitchen"
+    if any(token in query_text for token in ["当前房间：餐厅", "房间:餐厅", "房间：餐厅"]):
+        return "dining"
+    if any(token in query_text for token in ["当前房间：书房", "房间:书房", "房间：书房"]):
+        return "study"
+    if any(token in query_text for token in ["当前房间：客厅", "房间:客厅", "房间：客厅"]):
+        return "living"
+    if any(token in query_text for token in ["当前房间：卧室", "房间:卧室", "房间：卧室", "主卧"]):
+        return "bedroom"
+    if any(token in query_text for token in ["厨房", "kitchen"]):
+        return "kitchen"
+    if any(token in query_text for token in ["餐厅", "dining"]):
+        return "dining"
+    if any(token in query_text for token in ["书房", "study"]):
+        return "study"
     if any(token in query_text for token in ["卧室", "bedroom", "床", "bed"]):
         return "bedroom"
     if any(token in query_text for token in ["客厅", "living", "sofa", "沙发"]):

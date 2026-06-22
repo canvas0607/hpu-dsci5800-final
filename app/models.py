@@ -31,12 +31,24 @@ class FurniturePlacement(BaseModel):
     note: str = ""
 
 
+class RoomPlan(BaseModel):
+    room_name: str
+    room_type: str = "room"
+    text: str = ""
+    items: list[FurnitureItem] = Field(default_factory=list)
+    placements: list[FurniturePlacement] = Field(default_factory=list)
+    room_image_url: str = ""
+    total: float = 0.0
+    currency: str = "USD"
+
+
 class RecommendationResponse(BaseModel):
     uid: str
     text: str
     items: list[FurnitureItem] = Field(default_factory=list)
     placements: list[FurniturePlacement] = Field(default_factory=list)
     room_image_url: str = ""
+    room_plans: list[RoomPlan] = Field(default_factory=list)
     total: float
     currency: str = "USD"
     budget: float | None = None

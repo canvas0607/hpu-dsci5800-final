@@ -12,6 +12,8 @@ def plan_furniture_layout(
         return _bedroom_layout(items)
     if room == "living":
         return _living_layout(items)
+    if room in {"kitchen", "dining", "study"}:
+        return _work_or_dining_layout(items, room)
     return _general_layout(items)
 
 
@@ -22,6 +24,12 @@ def infer_room(request: str, items: list[FurnitureItem] | None = None) -> str:
         return "bedroom"
     if any(token in text for token in ["客厅", "living", "沙发"]) or "sofa" in categories:
         return "living"
+    if any(token in text for token in ["厨房", "kitchen"]):
+        return "kitchen"
+    if any(token in text for token in ["餐厅", "dining"]):
+        return "dining"
+    if any(token in text for token in ["书房", "study", "office"]):
+        return "study"
     return "general"
 
 
@@ -67,6 +75,19 @@ def _general_layout(items: list[FurnitureItem]) -> list[FurniturePlacement]:
             )
         )
     return placements
+
+
+def _work_or_dining_layout(items: list[FurnitureItem], room: str) -> list[FurniturePlacement]:
+    templates = {
+        "table": (0.30, 0.42, 0.34, 0.22, "center work zone", "桌子放在主要操作区中央或靠窗位置，保留通行距离。"),
+        "chair": (0.40, 0.66, 0.16, 0.16, "near table", "椅子靠近桌边，避免挡住柜门和动线。"),
+        "storage": (0.08, 0.20, 0.20, 0.38, "side wall", "收纳靠侧墙，集中放置杂物和小家电。"),
+        "lamp": (0.64, 0.24, 0.08, 0.16, "task light", "照明放在操作台或阅读区附近，补足局部光。"),
+    }
+    if room == "kitchen":
+        templates["storage"] = (0.08, 0.18, 0.22, 0.44, "kitchen storage wall", "厨房收纳靠墙，保持备餐动线清爽。")
+        templates["table"] = (0.38, 0.48, 0.28, 0.18, "prep or breakfast zone", "小桌可作为早餐区或备餐辅助台。")
+    return _apply_templates(items, templates)
 
 
 def _apply_templates(
