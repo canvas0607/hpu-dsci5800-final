@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 import html
+import logging
 import os
 from urllib.parse import quote
 
 from app.layout import infer_room
 from app.models import FurnitureItem, FurniturePlacement
+
+
+logger = logging.getLogger(__name__)
 
 
 async def attach_generated_images(
@@ -28,10 +32,15 @@ async def generate_room_image(
     request: str,
     image_notes: str = "",
 ) -> str:
-    if os.getenv("OPENAI_API_KEY") and os.getenv("DISABLE_AI_IMAGES", "").lower() != "true":
+    if os.getenv("DISABLE_AI_IMAGES", "").lower() == "true":
+        logger.info("AI image generation disabled by DISABLE_AI_IMAGES=true")
+        return ""
+    if os.getenv("OPENAI_API_KEY"):
         image_url = await _generate_room_with_openai(items, placements, request, image_notes)
         if image_url:
             return image_url
+    else:
+        logger.warning("OPENAI_API_KEY is not available to the running process")
     return ""
 
 
@@ -40,10 +49,15 @@ async def generate_furniture_image(
     request: str,
     image_notes: str = "",
 ) -> str:
-    if os.getenv("OPENAI_API_KEY") and os.getenv("DISABLE_AI_IMAGES", "").lower() != "true":
+    if os.getenv("DISABLE_AI_IMAGES", "").lower() == "true":
+        logger.info("AI image generation disabled by DISABLE_AI_IMAGES=true")
+        return _generated_svg_data_url(item, request)
+    if os.getenv("OPENAI_API_KEY"):
         image_url = await _generate_with_openai(item, request, image_notes)
         if image_url:
             return image_url
+    else:
+        logger.warning("OPENAI_API_KEY is not available to the running process")
     return _generated_svg_data_url(item, request)
 
 
@@ -69,7 +83,8 @@ async def _generate_with_openai(
             return f"data:image/png;base64,{image.b64_json}"
         if getattr(image, "url", None):
             return image.url
-    except Exception:
+    except Exception as exc:
+        logger.exception("OpenAI furniture image generation failed: %s", exc)
         return ""
     return ""
 
@@ -96,7 +111,8 @@ async def _generate_room_with_openai(
             return f"data:image/png;base64,{image.b64_json}"
         if getattr(image, "url", None):
             return image.url
-    except Exception:
+    except Exception as exc:
+        logger.exception("OpenAI room image generation failed: %s", exc)
         return ""
     return ""
 

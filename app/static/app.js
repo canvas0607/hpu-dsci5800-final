@@ -463,7 +463,7 @@ function renderRoom(imageUrl, nextPlacements) {
     roomImage.classList.add("hidden");
     roomImage.removeAttribute("src");
     renderNote.classList.remove("hidden");
-    renderNote.textContent = "未配置图片生成模型，当前只展示摆放方案；配置 OPENAI_API_KEY 后会生成真实整体效果图。";
+    renderNote.textContent = "暂未生成整体效果图，当前先展示摆放方案；请检查服务端 OPENAI_API_KEY、图片模型权限、网络连通性和日志。";
   }
   placements.innerHTML = "";
 
@@ -491,7 +491,7 @@ function renderRoomPlans(plans) {
     section.className = "room-plan";
     const image = plan.room_image_url
       ? `<img src="${escapeHtml(plan.room_image_url)}" alt="${escapeHtml(plan.room_name)}整体效果图" class="room-plan-image" />`
-      : `<p class="render-note">未配置图片生成模型，当前只展示 ${escapeHtml(plan.room_name)} 的摆放方案。</p>`;
+      : `<p class="render-note">暂未生成 ${escapeHtml(plan.room_name)} 整体效果图，当前先展示摆放方案。</p>`;
     const placementRows = (plan.placements || [])
       .map(
         (placement) => `
