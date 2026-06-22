@@ -28,6 +28,11 @@ FURNITURE_TERMS = [
     "家具",
     "宜家",
     "ikea",
+    "方案",
+    "推荐",
+    "设计",
+    "风格",
+    "预算",
     "套房",
     "整套",
     "全屋",
@@ -114,40 +119,14 @@ def preflight_request(request: str, has_upload: bool = False) -> PreflightResult
         )
 
     if not text and has_upload:
-        return PreflightResult(
-            action="clarify",
-            message=(
-                "我先不生成方案。你上传了文件，但还需要确认房间目标，避免我按错空间推荐。\n\n"
-                "请补充：\n"
-                "- 要做哪个空间：卧室、客厅、厨房、书房，还是整套房？\n"
-                "- 大概面积或长宽是多少？如果图里已标注，也可以说“按图纸尺寸”。\n"
-                "- 这个空间主要用途和预算是什么？"
-            ),
-        )
+        return PreflightResult(action="proceed")
 
-    if not _has_furniture_intent(lowered):
+    if not _has_furniture_intent(lowered, has_upload):
         return PreflightResult(
             action="refuse",
             message=(
                 "我目前只处理家具选择、空间摆放、预算和带官网引用的商品组合相关请求。\n\n"
                 "你可以这样问：给我一个 20 平卧室方案，预算 8000，喜欢温馨木色。"
-            ),
-        )
-
-    missing: list[str] = []
-    if not _has_room_or_use(lowered):
-        missing.append("房间类型或使用场景，例如卧室、客厅、书房、整套房，或睡眠/办公/会客")
-    if not _has_size_context(lowered, has_upload):
-        missing.append("面积或长宽，例如 20 平、4x5 米；如果上传户型图，也可以说明按图纸尺寸")
-
-    if missing:
-        return PreflightResult(
-            action="clarify",
-            message=(
-                "我先不生成方案。还需要你确认几个关键条件：\n\n"
-                + "\n".join(f"- {item}" for item in missing)
-                + "\n- 可选：预算、风格偏好、已有家具、是否租房、是否有儿童或宠物。\n\n"
-                "确认后我再搜索带价格和链接的官网商品、计算总金额并生成摆放建议。"
             ),
         )
 
@@ -158,7 +137,11 @@ def _looks_malicious(text: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in ATTACK_PATTERNS)
 
 
-def _has_furniture_intent(text: str) -> bool:
+def _has_furniture_intent(text: str, has_upload: bool = False) -> bool:
+    if has_upload:
+        return True
+    if SIZE_PATTERN.search(text):
+        return True
     return any(term in text for term in FURNITURE_TERMS)
 
 

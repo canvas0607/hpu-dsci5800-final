@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -116,16 +117,62 @@ NOISY_RESULT_TERMS = [
     "购物袋",
 ]
 
+OFFICIAL_FALLBACK_PRODUCT_URLS = {
+    "bed": [
+        "https://www.ikea.cn/cn/zh/p/malm-ma-er-mu-gao-chuang-jia-bai-se-lu-rui-s59009447",
+        "https://www.ikea.cn/cn/zh/p/malm-ma-er-mu-gao-chuang-jia-bai-se-20265179/",
+    ],
+    "nightstand": [
+        "https://www.ikea.cn/cn/zh/p/malm-ma-er-mu-liang-dou-chou-ti-gui-hei-he-se-50354621/",
+    ],
+    "lamp": [
+        "https://www.ikea.cn/cn/zh/p/tagarp-te-jia-pu-luo-di-deng-hei-se-bai-se-20464046",
+    ],
+    "rug": [
+        "https://www.ikea.cn/cn/zh/p/80596421",
+    ],
+    "wardrobe": [
+        "https://www.ikea.cn/cn/zh/p/brimnes-bai-ling-yi-gui-dai-3-ge-men-bai-se-10407928/",
+        "https://www.ikea.cn/cn/zh/p/brimnes-bai-ling-shuang-men-yi-gui-bai-se-20400479/",
+    ],
+    "storage": [
+        "https://www.ikea.cn/cn/zh/p/eket-cabinet-with-4-compartments-brown-walnut-effect-90574584",
+        "https://www.ikea.cn/cn/zh/p/ivar-yi-wa-ge-jia-dan-yuan-dai-gui-chou-ti-song-mu-hui-se-si-wang-s39395722",
+    ],
+    "sofa": [
+        "https://www.ikea.cn/cn/zh/p/klippan-ke-li-pa-shuang-ren-sha-fa-qia-bu-sa-shen-hui-se-s89251778/",
+        "https://www.ikea.cn/cn/zh/p/soederhamn-suo-de-han-si-ren-sha-fa-dai-gui-fei-yi-ta-mi-la-bai-se-hei-se-s19395006/",
+    ],
+    "table": [
+        "https://www.ikea.cn/cn/zh/p/havsta-hai-si-ta-cha-ji-bai-se-90404266/",
+        "https://www.ikea.cn/cn/zh/p/idanaes-yi-da-nai-cha-ji-shen-he-se-zhao-se-60487871/",
+    ],
+}
+
 
 async def search_furniture(
     query: str, budget: float | None, preferences: dict[str, Any]
 ) -> list[FurnitureItem]:
     query_text = f"{query} {preferences}".lower()
     room = _infer_room(query_text)
+    categories = ROOM_CATEGORY_PLAN.get(room) or _infer_categories(query)
     tavily_key = os.getenv("TAVILY_API_KEY")
-    if not tavily_key:
-        return []
-    return _fit_budget(await _search_with_tavily(tavily_key, query, room), budget)
+    items: list[FurnitureItem] = []
+    if tavily_key:
+        try:
+            timeout_seconds = float(os.getenv("SEARCH_TIMEOUT_SECONDS", "18"))
+            items = await asyncio.wait_for(
+                _search_with_tavily(tavily_key, query, room),
+                timeout=timeout_seconds,
+            )
+        except (httpx.HTTPError, TimeoutError, ValueError):
+            items = []
+
+    if len(items) < min(3, len(categories)):
+        fallback_items = await _search_official_fallback(categories)
+        items = _merge_items(items, fallback_items)
+
+    return _fit_budget(items, budget)
 
 
 async def search_ikea_furniture(
@@ -212,6 +259,77 @@ async def _search_category_with_tavily(
     return items
 
 
+async def _search_official_fallback(categories: list[str]) -> list[FurnitureItem]:
+    brand = BRAND_SOURCES[0]
+    items: list[FurnitureItem] = []
+    seen_urls: set[str] = set()
+    async with httpx.AsyncClient(timeout=12) as client:
+        for category in categories:
+            for url in OFFICIAL_FALLBACK_PRODUCT_URLS.get(category, []):
+                if url in seen_urls:
+                    continue
+                item = await _product_page_item(client, url, category, brand)
+                if item is None:
+                    continue
+                items.append(item)
+                seen_urls.add(url)
+                break
+            if len(items) >= 6:
+                break
+    return items
+
+
+async def _product_page_item(
+    client: httpx.AsyncClient,
+    url: str,
+    category: str,
+    brand: BrandSource,
+) -> FurnitureItem | None:
+    try:
+        response = await client.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return None
+
+    html = response.text
+    price = _extract_price_from_html(html)
+    if price <= 0:
+        return None
+    title = _extract_title_from_html(html) or urlparse(url).path.rsplit("/", 1)[-1]
+    return FurnitureItem(
+        name=_clean_product_title(title, brand),
+        category=category,
+        price=price,
+        currency="CNY",
+        url=str(response.url),
+        brand=brand.name,
+        reason=_source_reason(brand),
+    )
+
+
+def _merge_items(
+    primary: list[FurnitureItem], fallback: list[FurnitureItem]
+) -> list[FurnitureItem]:
+    merged: list[FurnitureItem] = []
+    seen_urls: set[str] = set()
+    seen_categories: set[str] = set()
+    for item in [*primary, *fallback]:
+        if item.url in seen_urls:
+            continue
+        if item.category in seen_categories and len(merged) >= 3:
+            continue
+        merged.append(item)
+        seen_urls.add(item.url)
+        seen_categories.add(item.category)
+        if len(merged) >= 6:
+            break
+    return merged
+
+
 def _site_clauses(brand: BrandSource) -> list[str]:
     return ["site:ikea.cn/cn/zh/p/"]
 
@@ -227,7 +345,10 @@ async def _fetch_product_price(client: httpx.AsyncClient, url: str) -> float:
     except httpx.HTTPError:
         return 0.0
 
-    html = response.text
+    return _extract_price_from_html(response.text)
+
+
+def _extract_price_from_html(html: str) -> float:
     for pattern in [
         r'i-price__sr-text">\s*¥\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)',
         r'<span class="i-price__currency">\s*¥\s*</span>\s*<span class="i-price__integer">([0-9]+(?:,[0-9]{3})*)</span>',
@@ -240,6 +361,15 @@ async def _fetch_product_price(client: httpx.AsyncClient, url: str) -> float:
         if match:
             return float(match.group(1).replace(",", ""))
     return 0.0
+
+
+def _extract_title_from_html(html: str) -> str:
+    match = re.search(r"<title>\s*(.*?)\s*</title>", html, flags=re.DOTALL | re.IGNORECASE)
+    if not match:
+        return ""
+    title = re.sub(r"\s+", " ", match.group(1)).strip()
+    title = title.replace("&#x2F;", "/").replace("&amp;", "&")
+    return title
 
 
 def _extract_price(text: str) -> float:
