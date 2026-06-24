@@ -4,86 +4,95 @@
 
 ## 4. 代理式工作流说明
 
-本系统的代理流程可以理解为：用户提出空间需求，后端先做安全判断，再由 LangGraph 组织多个节点完成“理解需求 -> 搜索商品 -> 规划摆放 -> 计算价格 -> 生成方案 -> 保存记忆 -> 前端展示”。相比普通聊天机器人，它不是一次性生成答案，而是将任务拆成多个可观察、可修订的步骤。
+本系统的代理流程可以理解为：用户提出空间需求后，前端通过 C/S 模式把文本、预算、图片或 PDF 发送到 FastAPI；后端用 LangGraph 编排代理步骤，用 LangChain/OpenAI 处理语言和视觉理解，用 Tavily 搜索官网商品，用确定性函数计算价格，并通过 SSE 流式推送给前端。相比普通聊天机器人，它不是一次性生成答案，而是将任务拆成多个可观察、可修订的步骤。
 
 ### 4.1 工作流总览图
 
 ```mermaid
 flowchart TD
-    U["用户<br/>文本 + 预算 + 图片/PDF"] --> FE["前端页面<br/>app/static/app.js"]
-    FE --> API["FastAPI<br/>/api/recommend/stream"]
-    API --> Guard{"安全预检<br/>preflight_request"}
+    U["用户<br/>文本 / 预算 / 图片 / 户型PDF"] --> FE["Web/H5 前端<br/>聊天式输入 + 文件上传"]
+    FE -->|"FormData + Fetch"| API["FastAPI 服务<br/>REST + SSE 流式响应"]
+    API --> Guard{"安全预检<br/>攻击/越权/提示词注入检测"}
     Guard -->|恶意/越权| Refuse["礼貌拒绝"]
-    Guard -->|家具方案请求| Graph["LangGraph Agent"]
-    Graph --> Understand["理解需求与多模态输入"]
-    Understand --> Scope{"判断范围"}
+    Guard -->|家具方案请求| Graph["LangGraph 代理工作流"]
+    Graph --> Understand["多模态理解<br/>文本 + Base64图片 + PDF渲染图"]
+    Understand --> Scope{"空间范围判断<br/>单房间 / 多房间 / 整套房"}
     Scope -->|单房间| Single["单房间方案"]
     Scope -->|整套房/多房间| Multi["分房间方案"]
-    Single --> Tools["调用工具<br/>搜索 + 布局 + 算价 + 图片"]
+    Single --> Tools["工具调用<br/>Tavily搜索 + 官网兜底 + 布局 + 算价 + 图片"]
     Multi --> Tools
-    Tools --> Answer["生成中文推荐方案"]
-    Answer --> Memory["保存偏好与历史"]
+    Tools --> Answer["LLM生成中文推荐<br/>商品引用 + 摆放 + 预算"]
+    Answer --> Memory["SQLite记忆<br/>用户偏好 + 历史记录"]
     Memory --> FE
     FE --> Export["页面展示<br/>Markdown / PDF 下载"]
 ```
 
 ### 4.2 LangGraph 代理节点图
 
-当前代理工作流在 `app/agent.py` 中通过 `StateGraph(FurnitureState)` 定义，核心节点如下：
+代理内部使用 LangGraph 的状态图模式。每个节点负责一个阶段，节点之间共享 `FurnitureState`，因此系统能把搜索结果、图片理解、价格、摆放和用户偏好串起来。
 
 ```mermaid
 flowchart TD
-    Start["Start"] --> A["load_user_context<br/>读取用户偏好"]
-    A --> B["understand_image<br/>理解图片/PDF"]
-    B --> C["detect_target_rooms<br/>判断单房间/整套房"]
+    Start["开始"] --> A["读取记忆<br/>SQLite 用户偏好"]
+    A --> B["理解输入<br/>文本 + 图片 + PDF"]
+    B --> B1["图片处理<br/>Base64 编码后送入视觉模型"]
+    B --> B2["PDF处理<br/>提取文字 + 渲染页面图"]
+    B1 --> C["空间范围分类<br/>LLM判断 + 规则兜底"]
+    B2 --> C
     C --> D{"房间数量 > 1?"}
-    D -->|No| E["search_candidates<br/>搜索单房间商品"]
-    D -->|Yes| F["build_room_plans<br/>分房间搜索与布局"]
-    E --> G["plan_layout_and_generate_room<br/>摆放 + 效果图"]
-    F --> H["calculate_total<br/>合并价格"]
+    D -->|否| E["单房间检索<br/>搜索核心家具"]
+    D -->|是| F["多房间规划<br/>客厅/卧室/厨房分别检索"]
+    E --> G["布局与图片<br/>摆放坐标 + 整体效果图"]
+    F --> H["价格汇总<br/>分房间小计 + 全屋总价"]
     G --> H
-    H --> I["generate_recommendation<br/>生成方案文本"]
-    I --> J["persist_memory<br/>保存偏好与历史"]
-    J --> End["END"]
+    H --> I["生成方案<br/>中文说明 + 引用链接"]
+    I --> J["更新记忆<br/>偏好沉淀 + 历史记录"]
+    J --> End["结束"]
 ```
 
 ### 4.3 系统架构图
 
-系统整体采用 C/S 架构：浏览器作为客户端，FastAPI 作为服务端，LangGraph 作为代理编排层，外部服务和本地工具作为能力层，SQLite 作为记忆层。
+系统整体采用 C/S 架构。浏览器负责交互和可视化，FastAPI 负责 API 与流式传输，LangGraph 负责代理编排，LangChain/OpenAI 负责大模型能力，Tavily 负责外部搜索，SQLite 和 LangGraph checkpoint 负责记忆与会话状态。
 
 ```mermaid
 flowchart LR
     subgraph Client["客户端 Browser"]
-        UI["HTML/CSS/JS 页面"]
-        Chat["聊天式输入框"]
-        Upload["图片/PDF 上传"]
-        Download["Markdown/PDF 下载"]
+        UI["响应式 Web/H5 UI"]
+        Chat["底部聊天输入"]
+        Upload["图片 / 户型 PDF 上传"]
+        Download["Markdown / PDF 方案下载"]
     end
 
-    subgraph Server["服务端 FastAPI"]
-        API["app/main.py<br/>REST + SSE"]
-        Guard["app/guardrails.py<br/>安全预检"]
-        Agent["app/agent.py<br/>LangGraph Agent"]
+    subgraph Server["应用服务层"]
+        API["FastAPI<br/>REST接口 + SSE流式推送"]
+        Guard["安全护栏<br/>恶意请求与注入防御"]
+        Agent["LangGraph Agent<br/>状态机式任务编排"]
     end
 
-    subgraph Tools["工具与能力层"]
-        Search["app/search.py<br/>Web Search + 官网兜底"]
-        Layout["app/layout.py<br/>摆放规划"]
-        Price["app/tools.py<br/>总价计算"]
-        Image["app/images.py<br/>整体效果图"]
-        PDF["app/pdf_export.py<br/>PDF 报告"]
-        PDFRead["app/pdf_utils.py<br/>户型 PDF 解析"]
+    subgraph AI["AI 能力层"]
+        LLM["LangChain + OpenAI Chat Model<br/>需求理解 / 方案生成 / 偏好提取"]
+        Vision["OpenAI Vision<br/>图片与户型图理解"]
+        ImageModel["OpenAI Image Model<br/>整体空间效果图"]
     end
 
-    subgraph External["外部模型/服务"]
-        OpenAI["OpenAI / LangChain<br/>文本 + 视觉 + 图片"]
-        Tavily["Tavily Search"]
-        Official["官网商品页"]
+    subgraph Tools["工具能力层"]
+        Search["Tavily Web Search<br/>搜索官网商品"]
+        Fallback["官网商品页抓取<br/>价格与链接兜底"]
+        Layout["规则布局引擎<br/>坐标化摆放"]
+        Price["确定性价格工具<br/>Decimal总价计算"]
+        PDF["PDF工具<br/>户型解析 + 报告导出"]
     end
 
-    subgraph Data["数据层"]
+    subgraph Data["数据与状态层"]
         SQLite["SQLite<br/>用户偏好 + 历史记录"]
-        Checkpoint["LangGraph Checkpoint<br/>会话状态"]
+        Checkpoint["LangGraph Checkpoint<br/>多轮会话状态"]
+    end
+
+    subgraph Outputs["输出层"]
+        Stream["聊天式结果"]
+        Cards["商品卡片"]
+        RoomImage["整体效果图"]
+        Report["Markdown / PDF 报告"]
     end
 
     UI --> API
@@ -91,73 +100,80 @@ flowchart LR
     Upload --> API
     API --> Guard
     Guard --> Agent
+    Agent --> LLM
+    Agent --> Vision
+    Agent --> ImageModel
     Agent --> Search
+    Agent --> Fallback
     Agent --> Layout
     Agent --> Price
-    Agent --> Image
-    Agent --> PDFRead
-    Search --> Tavily
-    Search --> Official
-    Agent --> OpenAI
-    Image --> OpenAI
+    Agent --> PDF
     Agent --> SQLite
     Agent --> Checkpoint
-    API --> UI
-    Download --> PDF
+    API --> Stream
+    API --> Cards
+    API --> RoomImage
+    API --> Report
+    Stream --> UI
+    Cards --> UI
+    RoomImage --> UI
+    Report --> Download
 ```
 
 ### 4.4 工具协作图
 
 ```mermaid
 flowchart TD
-    Agent["家具推荐 Agent"] --> Need["理解用户需求"]
-    Need --> Search["商品搜索工具"]
-    Search --> Tavily["Tavily 搜索"]
-    Search --> Fallback["官网商品页兜底"]
-    Search --> Items["结构化商品<br/>name/category/price/url"]
-    Items --> Layout["摆放规划工具"]
-    Items --> Price["价格计算工具"]
-    Layout --> Placement["摆放坐标与说明"]
-    Price --> Total["总金额"]
-    Items --> Image["图片生成工具"]
-    Placement --> Image
-    Image --> RoomPic["整体效果图"]
-    Total --> Final["最终方案"]
-    Placement --> Final
-    RoomPic --> Final
+    Agent["LangGraph Agent"] --> Intent["LangChain/OpenAI<br/>理解需求与范围"]
+    Intent --> Search["Tavily Web Search<br/>检索可购买商品"]
+    Search --> Check["商品校验<br/>官网链接 / 品类 / 价格"]
+    Check -->|结果不足| Fallback["官网商品页兜底<br/>实时抓取价格"]
+    Check -->|结果充足| Items["结构化商品数据"]
+    Fallback --> Items
+    Items --> Layout["布局引擎<br/>生成摆放坐标"]
+    Items --> Price["价格工具<br/>确定性求和"]
+    Items --> Image["OpenAI Image<br/>整体空间渲染"]
+    Layout --> Image
+    Layout --> Final["推荐方案"]
+    Price --> Final
+    Image --> Final
     Items --> Final
+    Final --> Export["SSE推送 + Markdown/PDF"]
 ```
 
 ### 4.5 计划 -> 行动 -> 观察 -> 修订循环图
 
 ```mermaid
 flowchart LR
-    Plan["计划 Plan<br/>判断房间范围与预算目标"] --> Act["行动 Act<br/>搜索商品、规划摆放、生成图片"]
-    Act --> Observe["观察 Observe<br/>检查是否有价格、链接、预算、图片"]
+    Plan["计划 Plan<br/>LLM判断空间范围<br/>识别预算和偏好"] --> Act["行动 Act<br/>Tavily搜索 / 布局 / 图片生成"]
+    Act --> Observe["观察 Observe<br/>检查官网链接、价格、预算、图片状态"]
     Observe --> Revise{"是否需要修订?"}
-    Revise -->|搜索不足| Fallback["官网兜底搜索"]
-    Revise -->|预算超出| Budget["筛选核心家具/给删减建议"]
+    Revise -->|搜索不足| Fallback["官网兜底抓取"]
+    Revise -->|预算超出| Budget["保留核心家具<br/>给删减顺序"]
+    Revise -->|图片失败| VisualFallback["展示摆放方案<br/>提示检查图片模型"]
     Revise -->|信息足够| Answer["输出方案"]
     Fallback --> Act
     Budget --> Answer
-    Answer --> Memory["保存偏好与历史"]
+    VisualFallback --> Answer
+    Answer --> Memory["保存偏好与历史<br/>SQLite + checkpoint"]
 ```
 
 简化来看，代理的循环是：先判断用户到底要哪个空间，再调用搜索、布局、价格、图片等工具；如果观察到搜索结果不足、没有价格或预算不合适，就修订策略，例如启用官网兜底或给出预算删减建议。
 
-### 4.6 关键代码对应关系
+### 4.6 技术组件说明
 
-| 图中模块 | 对应代码 | 说明 |
+| 技术组件 | 面向客户的解释 | 在系统中的价值 |
 |---|---|---|
-| API 层 | `app/main.py` | 提供 `/api/recommend/stream`、`/api/recommend`、`/api/plan/pdf`。 |
-| 安全预检 | `app/guardrails.py` | 过滤密钥、越权、攻击、提示词注入等恶意请求。 |
-| 代理编排 | `app/agent.py` | 使用 `StateGraph` 编排多节点工作流。 |
-| 商品搜索 | `app/search.py` | Tavily 搜索 + 官网商品页兜底 + 价格抓取。 |
-| 摆放规划 | `app/layout.py` | 按房间类型生成家具摆放坐标。 |
-| 价格计算 | `app/tools.py` | 后端确定性计算总金额。 |
-| 图片生成 | `app/images.py` | 调用 OpenAI 图片模型生成整体效果图。 |
-| PDF 解析/导出 | `app/pdf_utils.py`、`app/pdf_export.py` | 解析户型 PDF；导出最终方案 PDF。 |
-| 用户记忆 | `app/storage.py` | 保存 uid、偏好和历史推荐记录。 |
+| FastAPI | 后端 API 框架，负责接收用户请求和返回结果。 | 支持普通请求和 SSE 流式推送，让用户能边生成边看到进度。 |
+| LangGraph | 代理工作流编排框架，把任务拆成多个节点。 | 让系统有“步骤”和“状态”，而不是一次性回答。 |
+| LangChain + OpenAI Chat Model | 大模型调用层，用于需求理解、范围判断、方案生成和偏好提取。 | 提供自然语言理解与生成能力。 |
+| OpenAI Vision | 多模态视觉理解，用于分析用户上传的空间图片或户型 PDF 渲染图。 | 把图片线索转成可用于推荐的空间约束。 |
+| Base64 图片传输 | 图片上传后被转成 Base64，再传给视觉模型或图片模型。 | 统一处理图片/PDF 渲染图，便于模型读取。 |
+| Tavily Web Search | 外部搜索服务，用于搜索带官网链接和价格的商品。 | 降低模型编造商品的风险。 |
+| 官网商品页兜底抓取 | 当搜索结果不足时，直接访问官网商品页读取价格。 | 避免服务器搜索不稳定导致方案为空。 |
+| OpenAI Image Model | 根据商品和摆放坐标生成整体空间效果图。 | 将文字方案转成视觉效果，帮助用户理解搭配。 |
+| SQLite | 本地轻量数据库。 | 保存用户 uid、偏好和历史记录，实现记忆能力。 |
+| Markdown/PDF 输出 | 报告导出格式。 | 方便用户保存、提交、分享方案。 |
 
 ## 5. 工具使用或函数调用演示
 
@@ -349,9 +365,9 @@ data:image/png;base64,...
 
 ### 6.2 图表
 
-**部分实现。**
+**已实现为商品/价格表；未使用独立图表库。**
 
-前端当前未使用传统统计图表库，但方案中存在结构化价格表和商品表：
+系统没有使用 ECharts、Chart.js 等传统图表库，但方案中存在结构化价格表和商品表：
 
 - `calculate_cart_total()` 输出 `line_items`、`subtotal`、`total`。
 - `buildMarkdownPlan()` 在前端生成 Markdown 商品清单表。
@@ -377,28 +393,11 @@ data:image/png;base64,...
 
 ### 6.4 音频脚本或音频文件
 
-**当前代码未实现音频文件生成，但可以从现有文本方案直接生成音频脚本。**
-
-推荐文本来自 `generate_recommendation()` 的 `response_text`，已经包含空间判断、组合逻辑、摆放方案、购买建议和下一步行动。如果后续接入 TTS，可以直接把 `response_text` 作为音频脚本输入。
-
-**可扩展方案：**
-
-```text
-欢迎查看本次家具方案。你的目标是为 20 平卧室构建温馨木色空间。
-第一，核心家具建议选择床架、床头照明和衣物收纳。
-第二，床头靠主墙摆放，衣柜靠侧墙，地毯放在床前三分之一处。
-第三，当前预计总金额为……
-购买前请核验官网价格、库存、尺寸和配送安装条件。
-```
-
-**解决的问题：**
-
-- 面向移动端或视力不便用户，可以降低阅读成本。
-- 可以作为方案汇报、课堂展示或客户讲解的旁白。
+无。当前代码没有实现音频脚本生成、TTS 音频生成或音频文件下载。
 
 ### 6.5 仪表盘截图
 
-**前端支持仪表盘式页面展示，但代码没有自动截图功能。**
+无自动截图功能。当前代码支持前端仪表盘式页面展示，但没有生成或保存仪表盘截图。
 
 `app/static/app.js` 将 SSE 事件渲染为页面区域：
 
@@ -434,54 +433,11 @@ data:image/png;base64,...
 
 ### 6.7 幻灯片摘要
 
-**当前代码未实现 PPT 生成，但可由现有结构化数据直接转换。**
-
-`RecommendationResponse` 已经包含制作幻灯片所需数据：
-
-- `text`：方案摘要。
-- `items`：商品清单。
-- `placements`：摆放说明。
-- `room_image_url`：整体效果图。
-- `room_plans`：整套房分空间方案。
-- `total`：预算总额。
-
-**建议幻灯片结构：**
-
-1. 项目目标与用户约束。
-2. 空间判断与风格方向。
-3. 推荐商品清单。
-4. 摆放方案与效果图。
-5. 总金额和预算处理。
-6. 购买前核验事项。
-
-**解决的问题：**
-
-- 面向课堂展示或客户汇报时，能把复杂推荐转成简洁演示材料。
+无。当前代码没有实现 PPT、PPTX 或幻灯片摘要导出。
 
 ### 6.8 信息图
 
-**当前代码已具备信息图所需数据，但未单独生成信息图文件。**
-
-可以基于以下数据生成信息图：
-
-- `pricing.total`：总预算。
-- `pricing.line_items`：单品价格。
-- `placements`：空间位置。
-- `room_plans`：分房间小计。
-- `preferences`：用户偏好。
-
-**建议信息图内容：**
-
-- 顶部：总金额与预算状态。
-- 中部：房间分区卡片，如客厅、卧室、厨房。
-- 左侧：商品清单和价格。
-- 右侧：摆放坐标或效果图。
-- 底部：购买前核验清单。
-
-**解决的问题：**
-
-- 把大段文本压缩成一页视觉总结。
-- 帮助用户快速比较“预算、空间、商品、摆放”的关系。
+无。当前代码没有单独生成信息图文件。
 
 ## 结论
 
@@ -495,3 +451,21 @@ data:image/png;base64,...
 - 单房间和整套房在搜索前就分流，避免输出范围错乱。
 - 用户偏好通过 uid 写入 SQLite，实现持续记忆。
 - 最终输出同时支持聊天式展示、商品卡片、整体效果图、Markdown 和 PDF。
+
+### 技术反思 1
+
+工具如何提升了质量：
+- 使用了外部爬虫调用，可以获取实时最新的信息，这样模型减少幻觉
+- 使用了自己写的计算器模块，因为实操中发现模型对于预算的计算不准确，工具扩展了能力
+- 使用了langchain自带的checkpoint技术，来自动进行上下文压缩，保证对话的一致性，并且使用唯一id，可以针对不同的用户存储不同的会话，实现千人千面能力
+- langchain中的langgraph技术可以更细微的去处理流程，更为直观和底层，很适合处理细节
+
+### 技术反思 2
+
+如果要实际部署，你会如何改进这个系统:
+- 实际部署中，首要考虑安全性问题，模型所有中所有的秘钥需要做加密解密处理，并且需要反复进行压力测试，确保不会泄露任何秘钥和隐私数据，并且对于恶意用户要进行识别封禁
+- 在产品的生命周期中，需要持续的监控token消耗情况，服务器压力，可能存在的安全问题并且能迅速定位，需要用到实时观测和日志追踪
+- 现在生产环境普遍采用k8s进行运维，所以整套代码需要适配docker和做好持续集成(ci/cd)方案,保证系统稳定运行
+
+
+
