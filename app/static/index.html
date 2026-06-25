@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>家具选择助手</title>
-    <link rel="stylesheet" href="/static/styles.css?v=5" />
+    <link rel="stylesheet" href="/static/styles.css?v=8" />
   </head>
   <body>
     <main class="shell">
@@ -13,9 +13,12 @@
           <p class="eyebrow">HPU-DCSI5800 · Furniture Planning Assistant</p>
           <h1>家具选择助手</h1>
         </div>
-        <div class="identity-pill">
-          <span id="identityName">游客模式</span>
-          <small id="identityStatus">正在准备会话...</small>
+        <div class="topbar-actions">
+          <button id="newConversationBtn" class="secondary" type="button">新建对话</button>
+          <div class="identity-pill">
+            <span id="identityName">游客模式</span>
+            <small id="identityStatus">正在准备会话...</small>
+          </div>
         </div>
       </header>
 
@@ -45,6 +48,15 @@
               空间图片 / 户型 PDF
               <input id="image" type="file" accept="image/*,.pdf,application/pdf" />
             </label>
+          </section>
+
+          <section class="history-box">
+            <div class="history-head">
+              <h2>历史对话</h2>
+              <button id="refreshHistoryBtn" class="link-button" type="button">刷新</button>
+            </div>
+            <p id="historyEmpty" class="history-empty">还没有历史对话记录。</p>
+            <div id="historyList" class="history-list hidden"></div>
           </section>
         </aside>
 
@@ -82,6 +94,6 @@
         </section>
       </section>
     </main>
-    <script src="/static/app.js?v=21"></script>
+    <script src="/static/app.js?v=24"></script>
   </body>
 </html>

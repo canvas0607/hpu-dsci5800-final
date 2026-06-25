@@ -53,8 +53,10 @@ async def recommend(
     request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
+    thread_id: str = Form(""),
 ) -> RecommendationResponse:
     uid = uid.strip() or create_user()
+    thread_id = thread_id.strip() or uid
     if not request.strip() and image is None:
         raise HTTPException(status_code=400, detail="request or image is required")
 
@@ -70,6 +72,7 @@ async def recommend(
         budget=budget,
         image_bytes=image_bytes,
         image_mime=image_mime,
+        thread_id=thread_id,
     )
 
 
@@ -79,8 +82,10 @@ async def recommend_stream(
     request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
+    thread_id: str = Form(""),
 ) -> StreamingResponse:
     uid = uid.strip() or create_user()
+    thread_id = thread_id.strip() or uid
     if not request.strip() and image is None:
         raise HTTPException(status_code=400, detail="request or image is required")
 
@@ -110,6 +115,7 @@ async def recommend_stream(
                 budget=budget,
                 image_bytes=image_bytes,
                 image_mime=image_mime,
+                thread_id=thread_id,
             ):
                 yield _sse(event)
         except Exception as exc:

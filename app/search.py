@@ -11,6 +11,9 @@ import httpx
 
 from app.models import FurnitureItem
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 @dataclass(frozen=True)
 class BrandSource:

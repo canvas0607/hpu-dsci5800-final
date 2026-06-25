@@ -15,11 +15,12 @@ from app.images import generate_room_image
 from app.layout import plan_furniture_layout
 from app.models import FurnitureItem, FurniturePlacement, RecommendationResponse, RoomPlan
 from app.pdf_utils import analyze_pdf_bytes
-from app.prompts import PREFERENCE_PROMPT, RECOMMENDATION_PROMPT, SYSTEM_PROMPT
+from app.prompts import PREFERENCE_PROMPT, RECOMMENDATION_PROMPT, SYSTEM_PROMPT,SYSTEM_PROMPT_EN,SYSTEM_PROMPT_ZH
 from app.search import search_furniture
 from app.storage import add_history, get_preferences, update_preferences
 from app.tools import calculate_cart_total
-
+from dotenv import load_dotenv
+load_dotenv()
 
 class FurnitureState(TypedDict, total=False):
     uid: str
@@ -45,7 +46,12 @@ def _get_llm():
         return None
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.4)
+    return ChatOpenAI(
+        base_url=os.getenv("OPENAI_URL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+        temperature=0.4
+    )
 
 
 async def load_user_context(state: FurnitureState) -> FurnitureState:
@@ -100,7 +106,7 @@ async def understand_image(state: FurnitureState) -> FurnitureState:
                 }
             )
         result = await llm.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]
+            [SystemMessage(content=SYSTEM_PROMPT_ZH), HumanMessage(content=content)]
         )
         state["image_notes"] = f"{pdf_context.notes}\n视觉分析：{result.content}"
         return state
@@ -130,7 +136,7 @@ async def understand_image(state: FurnitureState) -> FurnitureState:
             },
         ]
     )
-    result = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT), message])
+    result = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT_ZH), message])
     state["image_notes"] = str(result.content)
     state["pdf_notes"] = ""
     return state
@@ -326,7 +332,7 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
         ),
     )
     result = await llm.ainvoke(
-        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        [SystemMessage(content=SYSTEM_PROMPT_ZH), HumanMessage(content=prompt)]
     )
     state["response_text"] = str(result.content)
     return state
@@ -463,7 +469,7 @@ async def _classify_target_rooms_with_llm(
 """
     try:
         result = await llm.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            [SystemMessage(content=SYSTEM_PROMPT_ZH), HumanMessage(content=prompt)]
         )
     except Exception:
         return []
@@ -715,7 +721,9 @@ async def run_furniture_assistant(
     budget: float | None,
     image_bytes: bytes | None = None,
     image_mime: str = "",
+    thread_id: str = "",
 ) -> RecommendationResponse:
+    thread_id = (thread_id or "").strip() or uid
     graph = await get_furniture_graph()
     final_state = await graph.ainvoke(
         {
@@ -725,7 +733,7 @@ async def run_furniture_assistant(
             "image_bytes": image_bytes,
             "image_mime": image_mime,
         },
-        config={"configurable": {"thread_id": uid}},
+        config={"configurable": {"thread_id": thread_id}},
     )
     items = final_state.get("items", [])
     return RecommendationResponse(
@@ -749,7 +757,9 @@ async def stream_furniture_assistant(
     budget: float | None,
     image_bytes: bytes | None = None,
     image_mime: str = "",
+    thread_id: str = "",
 ) -> AsyncGenerator[dict[str, Any], None]:
+    thread_id = (thread_id or "").strip() or uid
     graph = await get_furniture_graph()
     input_state = {
         "uid": uid,
@@ -773,7 +783,7 @@ async def stream_furniture_assistant(
     yield {"type": "status", "message": "开始处理请求..."}
     async for chunk in graph.astream(
         input_state,
-        config={"configurable": {"thread_id": uid}},
+        config={"configurable": {"thread_id": thread_id}},
         stream_mode="updates",
     ):
         for node_name, node_state in chunk.items():

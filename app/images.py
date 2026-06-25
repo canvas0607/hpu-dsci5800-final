@@ -8,7 +8,8 @@ from urllib.parse import quote
 
 from app.layout import infer_room
 from app.models import FurnitureItem, FurniturePlacement
-
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ async def _generate_with_openai(
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI()
+        client = AsyncOpenAI(base_url=os.getenv("OPENAI_URL"), api_key=os.getenv("OPENAI_API_KEY"))
         prompt = _image_prompt(item, request, image_notes)
         response = await client.images.generate(
             model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
@@ -98,9 +99,9 @@ async def _generate_room_with_openai(
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI()
+        client = AsyncOpenAI(base_url=os.getenv("OPENAI_URL"), api_key=os.getenv("OPENAI_API_KEY"))
         response = await client.images.generate(
-            model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
+            model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
             prompt=_room_image_prompt(items, placements, request, image_notes),
             size=os.getenv("OPENAI_IMAGE_SIZE", "1536x1024"),
             quality=os.getenv("OPENAI_IMAGE_QUALITY", "low"),

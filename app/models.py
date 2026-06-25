@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, Field
-
+from dotenv import load_dotenv
+load_dotenv()
 
 class UserCreateResponse(BaseModel):
     uid: str
