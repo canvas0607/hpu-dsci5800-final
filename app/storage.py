@@ -9,6 +9,9 @@ from typing import Any, Iterator
 
 DB_PATH = Path("data/furniture_assistant.sqlite3")
 
+# Number of (user, assistant) rounds kept as memory per conversation thread.
+MEMORY_ROUNDS = 10
+
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +37,22 @@ def init_db() -> None:
                 FOREIGN KEY(uid) REFERENCES users(uid)
             )
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_thread "
+            "ON conversation_messages (thread_id, id)"
         )
         conn.commit()
 
@@ -115,3 +134,46 @@ def get_history(uid: str, limit: int = 20) -> list[dict[str, Any]]:
             (uid, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def add_message(thread_id: str, uid: str, role: str, content: str) -> None:
+    """Append one conversation message and prune the thread to MEMORY_ROUNDS."""
+    if not thread_id or not content:
+        return
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO conversation_messages (thread_id, uid, role, content) "
+            "VALUES (?, ?, ?, ?)",
+            (thread_id, uid, role, content),
+        )
+        conn.execute(
+            """
+            DELETE FROM conversation_messages
+            WHERE thread_id = ?
+              AND id NOT IN (
+                SELECT id FROM conversation_messages
+                WHERE thread_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+              )
+            """,
+            (thread_id, thread_id, MEMORY_ROUNDS * 2),
+        )
+        conn.commit()
+
+
+def get_recent_messages(thread_id: str, rounds: int = MEMORY_ROUNDS) -> list[dict[str, str]]:
+    """Return the last ``rounds`` (user, assistant) turns in chronological order."""
+    if not thread_id:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content FROM conversation_messages
+            WHERE thread_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (thread_id, rounds * 2),
+        ).fetchall()
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]

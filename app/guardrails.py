@@ -115,8 +115,36 @@ SIZE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+BUDGET_PATTERN = re.compile(
+    r"(预算|budget|价位|花费|预计花|不超过|控制在)\s*[:：]?\s*\d"
+    r"|[¥￥$]\s*\d+"
+    r"|\d+(?:\.\d+)?\s*(万|千|块钱|块|元|圆|rmb|cny|usd|美元|美金|人民币)"
+    r"|\d+(?:\.\d+)?\s*[wk](?![a-z])",
+    re.IGNORECASE,
+)
 
-def preflight_request(request: str, has_upload: bool = False) -> PreflightResult:
+# A reply that is essentially just an amount (e.g. "8000" / "￥8000 元"), used to
+# read a bare number as the budget answer to a budget follow-up question.
+BARE_AMOUNT_PATTERN = re.compile(
+    r"^\s*[¥￥$]?\s*\d{3,}(?:\.\d+)?\s*(元|块|rmb|cny)?\s*$",
+    re.IGNORECASE,
+)
+
+# Core slots that must be present before running the full recommendation
+# pipeline; each maps to the follow-up question shown when it is missing.
+_SLOT_QUESTIONS = {
+    "room": "房间类型或用途（例如：主卧 / 客厅 / 书房，或“睡觉+收纳”“会客”这类用途）",
+    "size": "空间尺寸（面积或长×宽，例如：20 平 / 3.5×4 米；也可以直接上传户型图）",
+    "budget": "预算范围（例如：8000 元 / 1.2 万左右）",
+}
+
+
+def preflight_request(
+    request: str,
+    has_upload: bool = False,
+    budget: float | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> PreflightResult:
     text = request.strip()
     lowered = text.lower()
     if _looks_malicious(lowered):
@@ -128,10 +156,17 @@ def preflight_request(request: str, has_upload: bool = False) -> PreflightResult
             ),
         )
 
-    if not text and has_upload:
-        return PreflightResult(action="proceed")
+    # Aggregate prior user turns so a short follow-up ("预算 8000") is judged
+    # against the whole conversation rather than the latest message alone.
+    prior_user_messages = [
+        message.get("content", "")
+        for message in (history or [])
+        if message.get("role") == "user"
+    ]
+    user_messages = [*prior_user_messages, text]
+    combined = f"{' '.join(prior_user_messages)} {text}".strip().lower()
 
-    if not _has_furniture_intent(lowered, has_upload):
+    if not _has_furniture_intent(combined, has_upload):
         return PreflightResult(
             action="refuse",
             message=(
@@ -139,6 +174,10 @@ def preflight_request(request: str, has_upload: bool = False) -> PreflightResult
                 "你可以这样问：给我一个 20 平卧室方案，预算 8000，喜欢温馨木色。"
             ),
         )
+
+    missing = _missing_core_slots(combined, user_messages, has_upload, budget)
+    if missing:
+        return PreflightResult(action="clarify", message=_clarify_message(missing))
 
     return PreflightResult(action="proceed")
 
@@ -165,3 +204,65 @@ def _has_size_context(text: str, has_upload: bool) -> bool:
     if SIZE_PATTERN.search(text):
         return True
     return any(term in text for term in ["小户型", "大户型", "紧凑", "很小", "很大", "宽敞"])
+
+
+def _has_budget(text: str, budget: float | None) -> bool:
+    if budget is not None:
+        return True
+    return bool(BUDGET_PATTERN.search(text))
+
+
+def _is_bare_amount(text: str) -> bool:
+    return bool(BARE_AMOUNT_PATTERN.match(text))
+
+
+# Markers main.py writes into conversation memory when a file was uploaded; a
+# prior upload in the thread keeps satisfying the room and size slots even on
+# later text-only follow-ups.
+_UPLOAD_MARKERS = ("[用户上传了图片/户型图]", "[附带图片/户型图]")
+
+
+def _thread_had_upload(text: str) -> bool:
+    return any(marker in text for marker in _UPLOAD_MARKERS)
+
+
+def _missing_core_slots(
+    text: str,
+    user_messages: list[str],
+    has_upload: bool,
+    budget: float | None,
+) -> list[str]:
+    """Return the core slots still missing before a full plan can be generated.
+
+    ``text`` is the conversation-aggregated text (prior user turns + current);
+    ``user_messages`` are the individual user turns (incl. the current one) so a
+    bare-number reply like "8000" still counts as the budget on later turns. An
+    uploaded floor plan / room photo — this turn or earlier in the thread —
+    supplies both the space and its size; budget can never be inferred from an
+    image.
+    """
+    has_space = has_upload or _thread_had_upload(text)
+    missing: list[str] = []
+    if not (has_space or _has_room_or_use(text)):
+        missing.append("room")
+    if not _has_size_context(text, has_space):
+        missing.append("size")
+    budget_ok = _has_budget(text, budget) or any(
+        _is_bare_amount(message) for message in user_messages
+    )
+    if not budget_ok:
+        missing.append("budget")
+    return missing
+
+
+def _clarify_message(missing: list[str]) -> str:
+    asks = "\n".join(
+        f"{index}. {_SLOT_QUESTIONS[slot]}"
+        for index, slot in enumerate(missing, start=1)
+    )
+    return (
+        "我已经识别到这是一个家具/空间布置需求。为了给你可购买、可摆放、预算清晰的方案，"
+        "在开始搜索商品和生成效果图之前，我还需要先确认：\n\n"
+        f"{asks}\n\n"
+        "你可以一次补全，例如：「20 平主卧，预算 8000，喜欢温馨木色」。"
+    )

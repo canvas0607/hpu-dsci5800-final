@@ -70,7 +70,7 @@ async def _generate_with_openai(
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(base_url=os.getenv("OPENAI_URL"), api_key=os.getenv("OPENAI_API_KEY"))
+        client = AsyncOpenAI(base_url=os.getenv("OPENAI_IMAGES_URL"), api_key=os.getenv("OPENAI_API_KEY"))
         prompt = _image_prompt(item, request, image_notes)
         response = await client.images.generate(
             model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1"),
@@ -99,7 +99,7 @@ async def _generate_room_with_openai(
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(base_url=os.getenv("OPENAI_URL"), api_key=os.getenv("OPENAI_API_KEY"))
+        client = AsyncOpenAI(base_url=os.getenv("OPENAI_IMAGES_URL"), api_key=os.getenv("OPENAI_API_KEY"))
         response = await client.images.generate(
             model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
             prompt=_room_image_prompt(items, placements, request, image_notes),
