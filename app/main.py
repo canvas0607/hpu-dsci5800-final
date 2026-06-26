@@ -12,7 +12,14 @@ from app.agent import close_furniture_graph, run_furniture_assistant, stream_fur
 from app.guardrails import PreflightResult, preflight_request
 from app.models import HistoryRecord, RecommendationResponse, UserCreateResponse
 from app.pdf_export import build_plan_pdf
-from app.storage import create_user, ensure_user, get_history, init_db
+from app.storage import (
+    add_message,
+    create_user,
+    ensure_user,
+    get_history,
+    get_recent_messages,
+    init_db,
+)
 
 app = FastAPI(title="Furniture Choice Assistant", version="0.1.0")
 
@@ -53,24 +60,41 @@ async def recommend(
     request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
+    thread_id: str = Form(""),
 ) -> RecommendationResponse:
     uid = uid.strip() or create_user()
+    thread_id = thread_id.strip() or uid
     if not request.strip() and image is None:
         raise HTTPException(status_code=400, detail="request or image is required")
 
     ensure_user(uid)
     image_bytes = await image.read() if image else None
     image_mime = image.content_type if image else ""
-    preflight = preflight_request(request, has_upload=image is not None)
-    if preflight.should_stop:
+    history = get_recent_messages(thread_id)
+    preflight = preflight_request(
+        request, has_upload=image is not None, budget=budget, history=history
+    )
+    if preflight.action == "refuse":
         return _guardrail_response(uid=uid, budget=budget, preflight=preflight)
-    return await run_furniture_assistant(
+
+    user_message = _user_message(request, image is not None, budget)
+    if preflight.action == "clarify":
+        add_message(thread_id, uid, "user", user_message)
+        add_message(thread_id, uid, "assistant", preflight.message)
+        return _guardrail_response(uid=uid, budget=budget, preflight=preflight)
+
+    add_message(thread_id, uid, "user", user_message)
+    response = await run_furniture_assistant(
         uid=uid,
         request=request,
         budget=budget,
         image_bytes=image_bytes,
         image_mime=image_mime,
+        thread_id=thread_id,
+        history=history,
     )
+    add_message(thread_id, uid, "assistant", response.text)
+    return response
 
 
 @app.post("/api/recommend/stream")
@@ -79,19 +103,25 @@ async def recommend_stream(
     request: str = Form(""),
     budget: float | None = Form(None),
     image: UploadFile | None = File(None),
+    thread_id: str = Form(""),
 ) -> StreamingResponse:
     uid = uid.strip() or create_user()
+    thread_id = thread_id.strip() or uid
     if not request.strip() and image is None:
         raise HTTPException(status_code=400, detail="request or image is required")
 
     ensure_user(uid)
     image_bytes = await image.read() if image else None
     image_mime = image.content_type if image else ""
-    preflight = preflight_request(request, has_upload=image is not None)
+    history = get_recent_messages(thread_id)
+    preflight = preflight_request(
+        request, has_upload=image is not None, budget=budget, history=history
+    )
+    user_message = _user_message(request, image is not None, budget)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            if preflight.should_stop:
+            if preflight.action == "refuse":
                 yield _sse(
                     {
                         "type": preflight.action,
@@ -104,14 +134,39 @@ async def recommend_stream(
                     }
                 )
                 return
+            if preflight.action == "clarify":
+                add_message(thread_id, uid, "user", user_message)
+                add_message(thread_id, uid, "assistant", preflight.message)
+                yield _sse(
+                    {
+                        "type": preflight.action,
+                        "message": preflight.message,
+                        "data": _guardrail_response(
+                            uid=uid,
+                            budget=budget,
+                            preflight=preflight,
+                        ).model_dump(),
+                    }
+                )
+                return
+            add_message(thread_id, uid, "user", user_message)
+            assistant_text = ""
             async for event in stream_furniture_assistant(
                 uid=uid,
                 request=request,
                 budget=budget,
                 image_bytes=image_bytes,
                 image_mime=image_mime,
+                thread_id=thread_id,
+                history=history,
             ):
+                if event.get("type") == "summary":
+                    assistant_text = event.get("text", "") or assistant_text
+                elif event.get("type") == "final":
+                    assistant_text = (event.get("data") or {}).get("text", "") or assistant_text
                 yield _sse(event)
+            if assistant_text:
+                add_message(thread_id, uid, "assistant", assistant_text)
         except Exception as exc:
             yield _sse({"type": "error", "message": str(exc)})
 
@@ -142,6 +197,21 @@ async def plan_pdf(plan: RecommendationResponse) -> Response:
 
 def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _user_message(request: str, has_image: bool, budget: float | None = None) -> str:
+    text = request.strip()
+    if text and has_image:
+        base = f"{text}\n[附带图片/户型图]"
+    elif text:
+        base = text
+    elif has_image:
+        base = "[用户上传了图片/户型图]"
+    else:
+        base = ""
+    if budget is not None:
+        base = f"{base} [预算:{budget:g}]".strip()
+    return base
 
 
 def _guardrail_response(

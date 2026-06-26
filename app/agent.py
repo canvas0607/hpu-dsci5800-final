@@ -15,16 +15,18 @@ from app.images import generate_room_image
 from app.layout import plan_furniture_layout
 from app.models import FurnitureItem, FurniturePlacement, RecommendationResponse, RoomPlan
 from app.pdf_utils import analyze_pdf_bytes
-from app.prompts import PREFERENCE_PROMPT, RECOMMENDATION_PROMPT, SYSTEM_PROMPT
+from app.prompts import PREFERENCE_PROMPT, RECOMMENDATION_PROMPT, SYSTEM_PROMPT,SYSTEM_PROMPT_EN,SYSTEM_PROMPT_ZH,SYSTEM_PROMPT_ZH_V2
 from app.search import search_furniture
 from app.storage import add_history, get_preferences, update_preferences
 from app.tools import calculate_cart_total
-
+from dotenv import load_dotenv
+load_dotenv()
 
 class FurnitureState(TypedDict, total=False):
     uid: str
     request: str
     budget: float | None
+    history: list[dict[str, str]]
     image_bytes: bytes | None
     image_mime: str
     image_notes: str
@@ -45,7 +47,12 @@ def _get_llm():
         return None
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.4)
+    return ChatOpenAI(
+        base_url=os.getenv("OPENAI_URL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+        temperature=0.4
+    )
 
 
 async def load_user_context(state: FurnitureState) -> FurnitureState:
@@ -65,6 +72,42 @@ def _reset_transient_state(state: FurnitureState) -> None:
     state["pricing"] = {}
     state["response_text"] = ""
     state["total"] = 0.0
+
+
+_ROOM_SIGNAL_TOKENS = (
+    "客厅", "卧室", "主卧", "次卧", "厨房", "餐厅", "书房", "儿童房", "阳台", "玄关",
+    "沙发", "床", "衣柜", "餐桌", "书桌",
+    "living", "bedroom", "kitchen", "dining", "study",
+)
+
+
+def _has_explicit_room_signal(text: str) -> bool:
+    lowered = text.lower()
+    if any(token in lowered for token in _ROOM_SIGNAL_TOKENS):
+        return True
+    return _looks_whole_home_request(lowered)
+
+
+def _history_user_text(state: FurnitureState) -> str:
+    return " ".join(
+        message.get("content", "")
+        for message in state.get("history", [])
+        if message.get("role") == "user"
+    ).strip()
+
+
+def _render_history(history: list[dict[str, str]], max_chars: int = 600) -> str:
+    if not history:
+        return "无"
+    labels = {"user": "用户", "assistant": "助手"}
+    lines: list[str] = []
+    for message in history:
+        role = labels.get(message.get("role", ""), message.get("role", ""))
+        content = " ".join((message.get("content") or "").split())
+        if len(content) > max_chars:
+            content = content[:max_chars] + "…"
+        lines.append(f"{role}：{content}")
+    return "\n".join(lines)
 
 
 async def understand_image(state: FurnitureState) -> FurnitureState:
@@ -100,7 +143,7 @@ async def understand_image(state: FurnitureState) -> FurnitureState:
                 }
             )
         result = await llm.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]
+            [SystemMessage(content=SYSTEM_PROMPT_ZH_V2), HumanMessage(content=content)]
         )
         state["image_notes"] = f"{pdf_context.notes}\n视觉分析：{result.content}"
         return state
@@ -130,38 +173,50 @@ async def understand_image(state: FurnitureState) -> FurnitureState:
             },
         ]
     )
-    result = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT), message])
+    result = await llm.ainvoke([SystemMessage(content=SYSTEM_PROMPT_ZH_V2), message])
     state["image_notes"] = str(result.content)
     state["pdf_notes"] = ""
     return state
 
 
 async def detect_target_rooms(state: FurnitureState) -> FurnitureState:
-    fallback_rooms = _detect_target_rooms(
-        request=state.get("request", ""),
-        notes=" ".join([state.get("image_notes", ""), state.get("pdf_notes", "")]),
-        is_pdf=(state.get("image_mime") or "").lower() == "application/pdf",
-    )
+    request = state.get("request", "")
+    notes = " ".join([state.get("image_notes", ""), state.get("pdf_notes", "")])
+    is_pdf = (state.get("image_mime") or "").lower() == "application/pdf"
+
+    # Borrow room context from earlier user turns only when this turn names no
+    # space itself, so thin follow-ups ("预算 8000", "换北欧风") stay on the same
+    # room while a fresh room request is not wrongly widened by old turns.
+    detect_request = request
+    if not _has_explicit_room_signal(f"{request} {notes}"):
+        history_text = _history_user_text(state)
+        if history_text:
+            detect_request = f"{history_text}\n{request}".strip()
+
+    fallback_rooms = _detect_target_rooms(request=detect_request, notes=notes, is_pdf=is_pdf)
     llm_rooms = await _classify_target_rooms_with_llm(
-        request=state.get("request", ""),
-        notes=" ".join([state.get("image_notes", ""), state.get("pdf_notes", "")]),
+        request=detect_request,
+        notes=notes,
         fallback_rooms=fallback_rooms,
-        is_pdf=(state.get("image_mime") or "").lower() == "application/pdf",
+        is_pdf=is_pdf,
     )
     state["target_rooms"] = llm_rooms or fallback_rooms
     return state
 
 
 async def search_candidates(state: FurnitureState) -> FurnitureState:
-    query = " ".join(
-        part
-        for part in [
-            state.get("request", ""),
-            state.get("image_notes", ""),
-            json.dumps(state.get("preferences", {}), ensure_ascii=False),
-        ]
-        if part
-    )
+    request = state.get("request", "")
+    image_notes = state.get("image_notes", "")
+    parts = [request, image_notes]
+    # For thin follow-ups that name no furniture/room, fold in earlier user
+    # turns so the search stays on topic; otherwise keep the query focused on
+    # the current request to avoid mixing in past rooms.
+    if not _has_explicit_room_signal(f"{request} {image_notes}"):
+        history_text = _history_user_text(state)
+        if history_text:
+            parts.insert(0, history_text)
+    parts.append(json.dumps(state.get("preferences", {}), ensure_ascii=False))
+    query = " ".join(part for part in parts if part)
     state["items"] = await search_furniture(
         query=query,
         budget=state.get("budget"),
@@ -312,6 +367,7 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
     prompt = RECOMMENDATION_PROMPT.format(
         uid=state["uid"],
         request=state.get("request", ""),
+        history=_render_history(state.get("history", [])),
         budget=state.get("budget"),
         preferences=json.dumps(state.get("preferences", {}), ensure_ascii=False),
         image_notes=state.get("image_notes", ""),
@@ -326,7 +382,7 @@ async def generate_recommendation(state: FurnitureState) -> FurnitureState:
         ),
     )
     result = await llm.ainvoke(
-        [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        [SystemMessage(content=SYSTEM_PROMPT_ZH_V2), HumanMessage(content=prompt)]
     )
     state["response_text"] = str(result.content)
     return state
@@ -463,7 +519,7 @@ async def _classify_target_rooms_with_llm(
 """
     try:
         result = await llm.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            [SystemMessage(content=SYSTEM_PROMPT_ZH_V2), HumanMessage(content=prompt)]
         )
     except Exception:
         return []
@@ -715,17 +771,21 @@ async def run_furniture_assistant(
     budget: float | None,
     image_bytes: bytes | None = None,
     image_mime: str = "",
+    thread_id: str = "",
+    history: list[dict[str, str]] | None = None,
 ) -> RecommendationResponse:
+    thread_id = (thread_id or "").strip() or uid
     graph = await get_furniture_graph()
     final_state = await graph.ainvoke(
         {
             "uid": uid,
             "request": request,
             "budget": budget,
+            "history": history or [],
             "image_bytes": image_bytes,
             "image_mime": image_mime,
         },
-        config={"configurable": {"thread_id": uid}},
+        config={"configurable": {"thread_id": thread_id}},
     )
     items = final_state.get("items", [])
     return RecommendationResponse(
@@ -749,12 +809,16 @@ async def stream_furniture_assistant(
     budget: float | None,
     image_bytes: bytes | None = None,
     image_mime: str = "",
+    thread_id: str = "",
+    history: list[dict[str, str]] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
+    thread_id = (thread_id or "").strip() or uid
     graph = await get_furniture_graph()
     input_state = {
         "uid": uid,
         "request": request,
         "budget": budget,
+        "history": history or [],
         "image_bytes": image_bytes,
         "image_mime": image_mime,
     }
@@ -773,7 +837,7 @@ async def stream_furniture_assistant(
     yield {"type": "status", "message": "开始处理请求..."}
     async for chunk in graph.astream(
         input_state,
-        config={"configurable": {"thread_id": uid}},
+        config={"configurable": {"thread_id": thread_id}},
         stream_mode="updates",
     ):
         for node_name, node_state in chunk.items():

@@ -20,10 +20,16 @@ const renderNote = document.querySelector("#renderNote");
 const roomPlans = document.querySelector("#roomPlans");
 const downloadMarkdownBtn = document.querySelector("#downloadMarkdownBtn");
 const downloadPdfBtn = document.querySelector("#downloadPdfBtn");
+const historyList = document.querySelector("#historyList");
+const historyEmpty = document.querySelector("#historyEmpty");
+const refreshHistoryBtn = document.querySelector("#refreshHistoryBtn");
+const newConversationBtn = document.querySelector("#newConversationBtn");
 let latestMarkdown = "";
 let latestPlanData = null;
 let currentIdentity = null;
 let latestUserRequest = "";
+let loadedHistoryUid = null;
+let currentAssistantEl = null;
 
 initIdentity();
 
@@ -58,6 +64,40 @@ guestBtn.addEventListener("click", async () => {
   }
 });
 
+refreshHistoryBtn.addEventListener("click", () => {
+  loadHistory(currentIdentity?.uid || "");
+});
+
+newConversationBtn.addEventListener("click", () => {
+  if (!currentIdentity) return;
+  setIdentity({ ...currentIdentity, conversationId: newConversationId() }, "新对话已开始");
+  currentAssistantEl = null;
+  chatOutput.innerHTML = "";
+  latestMarkdown = "";
+  latestPlanData = null;
+  latestUserRequest = "";
+  total.textContent = "";
+  result.classList.add("hidden");
+  items.innerHTML = "";
+  placements.innerHTML = "";
+  roomPreview.classList.add("hidden");
+  roomImage.classList.add("hidden");
+  roomImage.removeAttribute("src");
+  renderNote.classList.add("hidden");
+  renderNote.textContent = "";
+  roomPlans.classList.add("hidden");
+  roomPlans.innerHTML = "";
+  downloadMarkdownBtn.classList.add("hidden");
+  downloadPdfBtn.classList.add("hidden");
+  requestInput.value = "";
+  requestInput.focus();
+});
+
+function newConversationId() {
+  if (window.crypto?.randomUUID) return crypto.randomUUID();
+  return `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const requestText = requestInput.value.trim();
@@ -66,7 +106,7 @@ form.addEventListener("submit", async (event) => {
   result.classList.remove("hidden");
   total.textContent = "";
   latestUserRequest = requestText;
-  chatOutput.innerHTML = "";
+  startChatTurn(requestText);
   renderChat("正在连接推荐流...", { status: true });
   latestMarkdown = "";
   latestPlanData = null;
@@ -85,6 +125,7 @@ form.addEventListener("submit", async (event) => {
   const formData = new FormData();
   const uid = await ensureUid();
   formData.append("uid", uid);
+  formData.append("thread_id", currentIdentity?.conversationId || uid);
   formData.append("request", requestText);
   if (budgetInput.value) formData.append("budget", budgetInput.value);
   if (imageInput.files[0]) formData.append("image", imageInput.files[0]);
@@ -208,6 +249,7 @@ function renderResult(data) {
     roomPlans.classList.add("hidden");
   }
   renderItems(data.items || []);
+  loadHistory(data.uid || currentIdentity?.uid || "");
 }
 
 async function ensureUid() {
@@ -255,15 +297,93 @@ async function initIdentity() {
 
 function setIdentity(identity, statusText = "") {
   currentIdentity = identity;
+  if (!currentIdentity.conversationId) currentIdentity.conversationId = currentIdentity.uid || "";
   uidInput.value = identity.uid || "";
   identityName.textContent = identity.type === "account" ? `账户：${identity.name}` : identity.name;
   setIdentityStatus(statusText || (identity.uid ? "会话已就绪" : "会话待准备"));
   localStorage.setItem("furniture_identity", JSON.stringify(identity));
   if (identity.uid) localStorage.setItem("furniture_uid", identity.uid);
+  if (identity.uid) {
+    if (identity.uid !== loadedHistoryUid) loadHistory(identity.uid);
+  } else {
+    loadedHistoryUid = null;
+    renderHistory([]);
+  }
 }
 
 function setIdentityStatus(message) {
   identityStatus.textContent = message;
+}
+
+async function loadHistory(uid) {
+  if (!uid) {
+    loadedHistoryUid = null;
+    renderHistory([]);
+    return;
+  }
+  loadedHistoryUid = uid;
+  try {
+    const response = await fetch(`/api/history/${encodeURIComponent(uid)}`);
+    if (!response.ok) throw new Error("history request failed");
+    const records = await response.json();
+    renderHistory(Array.isArray(records) ? records : []);
+  } catch {
+    renderHistory([], "历史记录加载失败，请点击刷新重试。");
+  }
+}
+
+function renderHistory(records, emptyMessage = "还没有历史对话记录。") {
+  historyList.innerHTML = "";
+  if (!records.length) {
+    historyEmpty.textContent = emptyMessage;
+    historyEmpty.classList.remove("hidden");
+    historyList.classList.add("hidden");
+    return;
+  }
+  historyEmpty.classList.add("hidden");
+  historyList.classList.remove("hidden");
+
+  for (const record of records) {
+    const title = String(record.user_request || "").trim() || "（图片 / 无文字需求）";
+    const meta = [formatHistoryDate(record.created_at), record.total ? formatMoney(record.total, "CNY") : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "history-item";
+    card.innerHTML = `
+      <span class="history-item-title">${escapeHtml(title)}</span>
+      <span class="history-item-meta">${escapeHtml(meta)}</span>
+    `;
+    card.addEventListener("click", () => showHistoryRecord(record));
+    historyList.appendChild(card);
+  }
+}
+
+function showHistoryRecord(record) {
+  result.classList.remove("hidden");
+  latestUserRequest = String(record.user_request || "");
+  latestMarkdown = "";
+  latestPlanData = null;
+  total.textContent = record.total ? `历史方案预计总金额：${formatMoney(record.total, "CNY")}` : "";
+  startChatTurn(latestUserRequest);
+  renderChat(record.summary || "这条历史记录没有保存方案内容。");
+  items.innerHTML = "";
+  placements.innerHTML = "";
+  roomPreview.classList.add("hidden");
+  roomPlans.classList.add("hidden");
+  downloadMarkdownBtn.classList.add("hidden");
+  downloadPdfBtn.classList.add("hidden");
+  result.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function formatHistoryDate(value) {
+  if (!value) return "";
+  const normalized = String(value).replace(" ", "T");
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function buildGuestName() {
@@ -370,6 +490,7 @@ downloadPdfBtn.addEventListener("click", async () => {
     link.remove();
     URL.revokeObjectURL(url);
   } catch (error) {
+    startChatTurn("");
     renderChat(`PDF 生成失败：${error.message}`);
   } finally {
     downloadPdfBtn.disabled = false;
@@ -377,14 +498,27 @@ downloadPdfBtn.addEventListener("click", async () => {
   }
 });
 
-function renderChat(markdownText, options = {}) {
-  chatOutput.innerHTML = "";
-  if (latestUserRequest) {
+function startChatTurn(userText = "") {
+  const turn = document.createElement("div");
+  turn.className = "chat-turn";
+  if (userText) {
     const userMessage = document.createElement("div");
     userMessage.className = "chat-message user-message";
-    userMessage.textContent = latestUserRequest;
-    chatOutput.appendChild(userMessage);
+    userMessage.textContent = userText;
+    turn.appendChild(userMessage);
   }
+  const assistant = document.createElement("div");
+  assistant.className = "chat-assistant";
+  turn.appendChild(assistant);
+  chatOutput.appendChild(turn);
+  currentAssistantEl = assistant;
+  chatOutput.scrollIntoView({ block: "end", behavior: "smooth" });
+  return assistant;
+}
+
+function renderChat(markdownText, options = {}) {
+  const assistant = currentAssistantEl || startChatTurn(latestUserRequest);
+  assistant.innerHTML = "";
   const blocks = String(markdownText || "")
     .split(/\n{2,}/)
     .map((block) => block.trim())
@@ -394,7 +528,7 @@ function renderChat(markdownText, options = {}) {
     const message = document.createElement("div");
     message.className = options.status ? "chat-message status-message" : "chat-message";
     message.innerHTML = inlineChatMarkup(block);
-    chatOutput.appendChild(message);
+    assistant.appendChild(message);
   }
   chatOutput.scrollIntoView({ block: "end", behavior: "smooth" });
 }
